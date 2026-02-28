@@ -1,10 +1,11 @@
 /**
- * VAIDYADRISHTI AI — Strict 3-Stage Hybrid Matching Engine
+ * VAIDYADRISHTI AI — Strict 4-Stage Hybrid Matching Engine
  *
- * STAGE 1: Exact match (brand_name + form)
- * STAGE 2: Fuzzy match (trigram similarity)
- * STAGE 3: Vector similarity (embeddings)
- * STAGE 4: AI Knowledge Fallback (external verification)
+ * STAGE 0: Local Cache (previously AI-discovered medicines — instant lookup)
+ * STAGE 1: Exact match (brand_name + form) — requires Supabase
+ * STAGE 2: Fuzzy match (trigram similarity) — requires Supabase
+ * STAGE 3: Vector similarity (embeddings)  — requires Supabase + OpenAI
+ * STAGE 4: AI Knowledge Fallback → auto-saved to local cache for next time
  *
  * STRICT RULES:
  * 1. Confidence: >=90% (High), 70-89% (Medium), <70% (Low).
@@ -16,14 +17,28 @@
 import { createClient } from '@supabase/supabase-js';
 import { getEmbedding, getZeroVector } from './embeddingService.js';
 import { verifyMedicineRealWorld, getMedicineDescription } from './aiVerificationService.js';
+import { findInCache, saveToCache } from './localCacheService.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
+// Lazy Supabase client — avoids crash at startup when env vars are not yet set
+let _supabase;
+function supabaseClient() {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
+        throw new Error('SUPABASE_NOT_CONFIGURED');
+    }
+    if (!_supabase) _supabase = createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_KEY
+    );
+    return _supabase;
+}
+
+// Returns true if Supabase is configured
+function hasSupabase() {
+    return !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY);
+}
 
 /**
  * Derive confidence level from strict thresholds.
@@ -79,11 +94,13 @@ function applyValidationRules(extraction, dbRecord, rawScore) {
 }
 
 async function exactMatch(extraction) {
+    if (!hasSupabase()) return null;
+
     const searchName = extraction.brand_variant
         ? `${extraction.brand_name} ${extraction.brand_variant}`
         : extraction.brand_name;
 
-    let query = supabase
+    let query = supabaseClient()
         .from('medicines')
         .select('*')
         .ilike('brand_name', searchName);
@@ -109,11 +126,13 @@ async function exactMatch(extraction) {
 }
 
 async function fuzzyMatch(extraction) {
+    if (!hasSupabase()) return null;
+
     const searchText = extraction.brand_variant
         ? `${extraction.brand_name} ${extraction.brand_variant}`
         : extraction.brand_name;
 
-    const { data, error } = await supabase.rpc('hybrid_medicine_search', {
+    const { data, error } = await supabaseClient().rpc('hybrid_medicine_search', {
         query_text: searchText,
         query_vector: JSON.stringify(getZeroVector()),
         match_limit: 5,
@@ -135,6 +154,8 @@ async function fuzzyMatch(extraction) {
 }
 
 async function vectorMatch(extraction) {
+    if (!hasSupabase()) return null;
+
     const searchText = [
         extraction.brand_name,
         extraction.brand_variant,
@@ -148,7 +169,7 @@ async function vectorMatch(extraction) {
         return null;
     }
 
-    const { data, error } = await supabase.rpc('hybrid_medicine_search', {
+    const { data, error } = await supabaseClient().rpc('hybrid_medicine_search', {
         query_text: searchText,
         query_vector: JSON.stringify(embedding),
         match_limit: 5,
@@ -179,25 +200,34 @@ export async function matchMedicines(extractions) {
 
         console.log(`[Matching] Processing: "${brandQuery}"...`);
 
-        // STAGE 1 — Exact Match (Fast)
-        const exact = await exactMatch(extraction); // Changed to use existing exactMatch
-        if (exact) {
-            matchResult = { record: exact.record, method: 'EXACT', rawScore: exact.rawScore / 100 }; // Adjust rawScore to be 0-1
+        // STAGE 0 — Local Cache (previously AI-discovered medicines)
+        const cached = findInCache(extraction.brand_name, extraction.brand_variant);
+        if (cached) {
+            console.log(`[LocalCache] ⚡ Cache hit for "${brandQuery}" — skipping AI lookup`);
+            matchResult = { record: cached, method: 'CACHE', rawScore: cached.confidence_pct / 100 || 0.95 };
         }
 
-        // STAGE 2 — Trigram Similarity (Fuzzy)
+        // STAGE 1 — Exact Match (Fast, requires Supabase)
         if (!matchResult) {
-            const fuzzy = await fuzzyMatch(extraction); // Changed to use existing fuzzyMatch
-            if (fuzzy) {
-                matchResult = { record: fuzzy.record, method: 'FUZZY', rawScore: fuzzy.rawScore / 100 }; // Adjust rawScore to be 0-1
+            const exact = await exactMatch(extraction);
+            if (exact) {
+                matchResult = { record: exact.record, method: 'EXACT', rawScore: exact.rawScore / 100 };
             }
         }
 
-        // STAGE 3 — Vector Search (Semantic)
+        // STAGE 2 — Trigram Similarity (Fuzzy, requires Supabase)
         if (!matchResult) {
-            const vector = await vectorMatch(extraction); // Changed to use existing vectorMatch
+            const fuzzy = await fuzzyMatch(extraction);
+            if (fuzzy) {
+                matchResult = { record: fuzzy.record, method: 'FUZZY', rawScore: fuzzy.rawScore / 100 };
+            }
+        }
+
+        // STAGE 3 — Vector Search (Semantic, requires Supabase + OpenAI)
+        if (!matchResult) {
+            const vector = await vectorMatch(extraction);
             if (vector) {
-                matchResult = { record: vector.record, method: 'VECTOR', rawScore: vector.rawScore / 100 }; // Adjust rawScore to be 0-1
+                matchResult = { record: vector.record, method: 'VECTOR', rawScore: vector.rawScore / 100 };
             }
         }
 
@@ -206,23 +236,41 @@ export async function matchMedicines(extractions) {
 
         if (matchResult) {
             const { record, method, rawScore } = matchResult;
-            const validation = applyValidationRules(extraction, record, rawScore * 100); // Pass rawScore as 0-100
 
-            matchedMedicine = {
-                id: record.id,
-                brand_name: record.brand_name,
-                generic_name: record.generic_name,
-                strength: record.strength,
-                form: record.form,
-                manufacturer: record.manufacturer,
-                is_combination: record.is_combination,
-                similarity_percentage: validation.finalScore,
-                confidence: deriveConfidence(validation.finalScore),
-                match_method: method,
-                verified_by: 'INTERNAL_DB',
-                validation_warnings: validation.warnings
-            };
-            warnings = validation.warnings;
+            // Cache hits don't need validation rules (already validated when first saved)
+            if (method === 'CACHE') {
+                matchedMedicine = {
+                    id:                  record.id || `cache_${Date.now()}`,
+                    brand_name:          record.brand_name,
+                    generic_name:        record.generic_name,
+                    strength:            record.strength,
+                    form:                record.form,
+                    manufacturer:        record.manufacturer,
+                    is_combination:      record.is_combination,
+                    similarity_percentage: record.confidence_pct || 95,
+                    confidence:          'High',
+                    match_method:        'LOCAL_CACHE',
+                    verified_by:         `Local Cache (${record.verified_by || 'AI'})`,
+                    validation_warnings: []
+                };
+            } else {
+                const validation = applyValidationRules(extraction, record, rawScore * 100);
+                matchedMedicine = {
+                    id:                  record.id,
+                    brand_name:          record.brand_name,
+                    generic_name:        record.generic_name,
+                    strength:            record.strength,
+                    form:                record.form,
+                    manufacturer:        record.manufacturer,
+                    is_combination:      record.is_combination,
+                    similarity_percentage: validation.finalScore,
+                    confidence:          deriveConfidence(validation.finalScore),
+                    match_method:        method,
+                    verified_by:         'INTERNAL_DB',
+                    validation_warnings: validation.warnings
+                };
+                warnings = validation.warnings;
+            }
         } else {
             // STAGE 4 — AI Knowledge Fallback
             console.log(`[Matching] No DB hits for "${brandQuery}". Triggering Stage 4 AI...`);
@@ -234,8 +282,17 @@ export async function matchMedicines(extractions) {
 
             if (aiMatch) {
                 matchedMedicine = aiMatch;
-                // --- TRAINING STAGE: Persist high-confidence external matches ---
+                // --- AUTO-LEARNING: Save High-confidence matches to local cache + Supabase ---
                 if (matchedMedicine.confidence === 'High') {
+                    // Use the clean NLP-extracted name (e.g. "Paracetamol") as the cache lookup key.
+                    // The Stage 4 result brand_name may be a long RxNorm string like
+                    // "acetaminophen 300 MG Oral Capsule [By Ache]" which won't match future NLP lookups.
+                    saveToCache({
+                        ...matchedMedicine,
+                        brand_name: extraction.brand_name,          // ← lookup key for next scan
+                        full_name:  matchedMedicine.brand_name,     // ← keep original for reference
+                    });
+                    // Also try Supabase if configured
                     await persistExternalMatch(matchedMedicine);
                 }
             }
@@ -279,11 +336,12 @@ export async function matchMedicines(extractions) {
  * This effectively "trains" the system with new medicines.
  */
 async function persistExternalMatch(aiMatch) {
+    if (!hasSupabase()) return; // Skip persistence when DB not configured
     try {
         console.log(`[Training] Persisting new medicine: "${aiMatch.brand_name}"...`);
 
         // 1. Check if it somehow already exists (prevent race conditions)
-        const { data: existing } = await supabase
+        const { data: existing } = await supabaseClient()
             .from('medicines')
             .select('id')
             .ilike('brand_name', aiMatch.brand_name)
@@ -301,7 +359,7 @@ async function persistExternalMatch(aiMatch) {
         const embedding = await getEmbedding(embeddingText);
 
         // 3. Insert into medicines table
-        const { error: insertError } = await supabase
+        const { error: insertError } = await supabaseClient()
             .from('medicines')
             .insert({
                 brand_name: aiMatch.brand_name,
