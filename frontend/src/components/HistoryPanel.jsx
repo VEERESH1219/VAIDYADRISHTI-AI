@@ -15,7 +15,8 @@ export default function HistoryPanel({ isOpen, onClose }) {
     const [history, setHistory] = useState([]);
 
     useEffect(() => {
-        if (isOpen) setHistory(getHistory());
+        if (!isOpen) return;
+        setHistory(getHistory()); // eslint-disable-line react-hooks/set-state-in-effect
     }, [isOpen]);
 
     const doClear = () => { clearHistory(); setHistory([]); };

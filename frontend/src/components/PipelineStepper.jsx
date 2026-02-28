@@ -22,7 +22,6 @@ export default function PipelineStepper({ currentStep }) {
                 {STEPS.map((step, i) => {
                     const done = i < currentStep;
                     const active = i === currentStep;
-                    const pending = i > currentStep;
 
                     return (
                         <div key={step.label} style={{ display: 'flex', alignItems: 'stretch', gap: 0 }}>
