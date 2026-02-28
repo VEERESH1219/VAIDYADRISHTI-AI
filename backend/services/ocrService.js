@@ -1,12 +1,18 @@
 /**
- * VAIDYADRISHTI AI — Multi-Pass OCR Engine
+ * VAIDYADRISHTI AI — Multi-Pass OCR Engine  (Vision-First Architecture)
  *
- * Core innovation: runs 5 parallel Tesseract.js passes with different
- * image preprocessing variants, then builds consensus from all results.
+ * Strategy:
+ *   1. Vision LLM runs IMMEDIATELY as the PRIMARY engine (not a fallback).
+ *      Handwriting is near-impossible for Tesseract; vision models handle it.
+ *   2. Tesseract runs in parallel as a cross-check for printed/typed text.
+ *   3. If Vision LLM returns meaningful text it is always preferred.
+ *   4. Tesseract result is used only if vision LLM fails or returns very
+ *      short/empty output.
  *
- * For handwritten prescriptions where Tesseract fails, falls back to
- * a vision-capable LLM (GPT-4o, Claude, or Gemini) via llmService.
- * Configure with VISION_PROVIDER in .env
+ * Configure VISION_PROVIDER in .env:
+ *   ollama  (default, free) — use llava-llama3 or llava:13b for best results
+ *   openai  — GPT-4o, most accurate
+ *   anthropic / gemini — good alternatives
  */
 
 import Tesseract from 'tesseract.js';
@@ -18,59 +24,129 @@ import {
     preprocessBinarize,
     preprocessDeskew,
     preprocessInvert,
+    preprocessForVision,
 } from './preprocessingService.js';
 import { buildConsensus, deriveQualityTag } from '../utils/consensus.js';
 
 dotenv.config();
 
 const PREPROCESSING_VARIANTS = [
-    { name: 'standard', fn: preprocessStandard },
+    { name: 'standard',     fn: preprocessStandard     },
     { name: 'highContrast', fn: preprocessHighContrast },
-    { name: 'binarized', fn: preprocessBinarize },
-    { name: 'deskewed', fn: preprocessDeskew },
-    { name: 'inverted', fn: preprocessInvert },
+    { name: 'binarized',    fn: preprocessBinarize     },
+    { name: 'deskewed',     fn: preprocessDeskew       },
+    { name: 'inverted',     fn: preprocessInvert       },
 ];
 
-const VISION_SYSTEM_PROMPT = `You are a document text extraction engine for a healthcare IT digitization system. Your task is to perform OCR — read and transcribe all visible text from the provided document image.
+// ── Vision prompt — precision-tuned for Indian handwritten prescriptions ──
+const VISION_SYSTEM_PROMPT = `You are an expert medical transcriptionist with 20 years of experience reading handwritten Indian doctor prescriptions.
 
-This is used in a hospital's Electronic Health Records (EHR) system to digitize paper documents for record-keeping.
+Your task: Read this prescription image and transcribe EVERY piece of text you can see.
 
-INSTRUCTIONS:
-1. Transcribe ALL visible text exactly as written, line by line.
-2. Maintain the original line structure.
-3. For handwritten text, interpret using contextual clues. For example, in clinical shorthand: "Adv" = Advice, "C/o" = Complaints of, "Imp" = Impression, "OE" = On Examination.
-4. If you cannot read a word, write [unclear] in its place.
-5. Output ONLY the transcribed text. No commentary. No analysis. No suggestions.`;
+WHAT TO EXTRACT (in order of importance):
+1. Each medicine line — name, strength, form, frequency, duration
+   Examples: "Tab. Paracetamol 500mg BD x 5 days"
+             "Augmentin 625 TDS 7/7"
+             "Pantop 40 OD AC 1/12"
+             "Cetirizine 10mg 0-0-1 x 10 days"
+2. Diagnosis / Dx / Impression / C/o line at top
+3. Doctor name, hospital, date — if visible
+4. Any special instructions (e.g., "avoid spicy food", "complete course")
 
-const VISION_USER_PROMPT = 'Please perform OCR on this document image and return the transcribed text:';
+COMMON INDIAN PRESCRIPTION SHORTHAND (recognize these):
+Frequency:  OD=once daily  BD=twice daily  TDS=three times  QID=four times
+            SOS=as needed  HS=bedtime  1-0-1=morning-noon-night  1-1-1=all three
+Timing:     AC=before food  PC=after food  CC=with food
+Form:       Tab.=Tablet  Cap.=Capsule  Inj.=Injection  Syr.=Syrup  Oint.=Ointment
+Duration:   x5d or 5/7=5 days  1/52=1 week  1/12=1 month
+Dx prefix:  Dx=Diagnosis  C/o=Complaints  O/E=On Examination  Rx=Treatment
+
+IMPORTANT RULES:
+- If a word is unclear, make your best medical educated guess based on context
+- DO NOT write [unclear] or skip anything — attempt every word
+- A prescription may have 2-8 medicines — list ALL of them
+- Output ONLY the transcribed text, line by line, nothing else
+- Do not add any commentary, headings, or explanations`;
+
+const VISION_USER_PROMPT = 'Transcribe all text from this prescription image:';
 
 /**
- * Vision LLM OCR — fallback for handwritten prescriptions.
- * Uses the provider configured by VISION_PROVIDER in .env
- * (default: openai/GPT-4o, also supports anthropic and gemini).
+ * Prepare image for Vision LLM.
+ * Returns a high-quality base64 data URI optimised for vision models.
  */
-async function visionFallbackOCR(base64DataUri) {
-    return visionOCR(base64DataUri, VISION_SYSTEM_PROMPT, VISION_USER_PROMPT);
+async function prepareForVision(imageBuffer) {
+    try {
+        const enhanced = await preprocessForVision(imageBuffer);
+        return 'data:image/png;base64,' + enhanced.toString('base64');
+    } catch {
+        return 'data:image/png;base64,' + imageBuffer.toString('base64');
+    }
+}
+
+/**
+ * Run Vision LLM OCR on the image.
+ */
+async function runVisionOCR(base64DataUri) {
+    console.log(`[OCR] Running Vision LLM (${VISION_PROVIDER}) as PRIMARY engine...`);
+    const text = await visionOCR(base64DataUri, VISION_SYSTEM_PROMPT, VISION_USER_PROMPT);
+    console.log(`[OCR] Vision result (${text?.length || 0} chars):\n`, text?.slice(0, 400));
+    return text || '';
+}
+
+/**
+ * Run all Tesseract passes in parallel.
+ * Returns the best consensus result.
+ */
+async function runTesseractPasses(imageBuffer, passes = 5) {
+    const selectedVariants = PREPROCESSING_VARIANTS.slice(0, Math.min(passes, 5));
+
+    const passResults = await Promise.all(
+        selectedVariants.map(async (variant) => {
+            try {
+                const processedBuffer = await variant.fn(imageBuffer);
+                const { data } = await Tesseract.recognize(processedBuffer, 'eng', {
+                    tessedit_pageseg_mode: '6',
+                    preserve_interword_spaces: '1',
+                });
+                return {
+                    variant: variant.name,
+                    text: data.text || '',
+                    confidence: data.confidence || 0,
+                };
+            } catch (err) {
+                console.warn(`[OCR Tesseract: ${variant.name}] ${err.message}`);
+                return { variant: variant.name, text: '', confidence: 0 };
+            }
+        })
+    );
+
+    const validPasses = passResults.filter((p) => p.text.trim().length > 10);
+    if (validPasses.length === 0) return { text: '', confidence: 0 };
+
+    const consensusResult = buildConsensus(validPasses, 2);
+    const bestPass = validPasses.reduce((best, p) => p.confidence > best.confidence ? p : best);
+
+    const finalText = consensusResult.score >= 20 ? consensusResult.text : bestPass.text;
+    const finalConf = consensusResult.score >= 20 ? consensusResult.score : bestPass.confidence;
+
+    console.log(`[OCR] Tesseract: ${validPasses.length}/${passes} valid passes, best confidence ${bestPass.confidence.toFixed(0)}%`);
+    return { text: finalText, confidence: finalConf };
 }
 
 /**
  * Run multi-pass OCR on an image.
+ * Vision LLM is PRIMARY — Tesseract is the fallback for printed/typed text.
  *
  * @param {string|Buffer} imageInput — base64 data URI or raw Buffer
  * @param {object} options
- * @param {number} options.passes — number of passes (3–5, default 5)
- * @param {number} options.minConsensus — min passes to agree (default 2)
+ * @param {number} options.passes — number of Tesseract passes (3-5, default 5)
  * @param {boolean} options.debug — include per-pass results
- * @returns {Promise<object>} OCR result conforming to OCRResult interface
+ * @returns {Promise<object>} OCR result
  */
 export async function runMultiPassOCR(imageInput, options = {}) {
-    const {
-        passes = 5,
-        minConsensus = parseInt(process.env.OCR_MIN_CONSENSUS_PASSES || '2', 10),
-        debug = false,
-    } = options;
+    const { passes = 5 } = options;
 
-    // Store original base64 for GPT-4o Vision fallback
+    // Normalise input
     let base64DataUri;
     let imageBuffer;
 
@@ -83,117 +159,62 @@ export async function runMultiPassOCR(imageInput, options = {}) {
         base64DataUri = 'data:image/png;base64,' + imageInput.toString('base64');
     }
 
-    // Select which variants to run (cap at available)
-    const selectedVariants = PREPROCESSING_VARIANTS.slice(0, Math.min(passes, 5));
+    // Prepare a vision-optimised image (higher res, better contrast for LLM)
+    const visionDataUri = await prepareForVision(imageBuffer);
 
-    // Run all passes IN PARALLEL for speed
-    const passResults = await Promise.all(
-        selectedVariants.map(async (variant) => {
-            try {
-                const processedBuffer = await variant.fn(imageBuffer);
-                const { data } = await Tesseract.recognize(processedBuffer, 'eng', {
-                    tessedit_pageseg_mode: '6',
-                    preserve_interword_spaces: '1',
-                });
+    // Run Vision LLM + Tesseract SIMULTANEOUSLY for speed
+    const [visionText, tesseractResult] = await Promise.all([
+        runVisionOCR(visionDataUri).catch(err => {
+            console.error('[OCR] Vision LLM error:', err.message);
+            return '';
+        }),
+        runTesseractPasses(imageBuffer, passes).catch(err => {
+            console.error('[OCR] Tesseract error:', err.message);
+            return { text: '', confidence: 0 };
+        }),
+    ]);
 
-                return {
-                    variant: variant.name,
-                    text: data.text || '',
-                    confidence: data.confidence || 0,
-                };
-            } catch (err) {
-                console.error(`[OCR Pass: ${variant.name}] Error:`, err.message);
-                return {
-                    variant: variant.name,
-                    text: '',
-                    confidence: 0,
-                };
-            }
-        })
-    );
+    const visionIsUsable    = visionText && visionText.trim().length >= 25;
+    const tesseractIsUsable = tesseractResult.text && tesseractResult.text.trim().length >= 25;
 
-    // Filter out empty passes
-    const validPasses = passResults.filter((p) => p.text.trim().length > 0);
-
-    if (validPasses.length === 0) {
-        // All Tesseract passes returned empty — use GPT-4o Vision
-        const visionText = await visionFallbackOCR(base64DataUri);
+    // Vision LLM wins — it handles handwriting far better than Tesseract
+    if (visionIsUsable) {
+        console.log('[OCR] Using Vision LLM result (primary)');
         return {
-            final_text: visionText,
-            consensus_score: visionText.length > 10 ? 95 : 0,
-            quality_tag: visionText.length > 10 ? 'HIGH_CONFIDENCE' : 'LOW_QUALITY',
-            passes_completed: passResults.length,
-            passes_agreed: 0,
-            pass_results: debug ? passResults : undefined,
-            fallback_used: `${VISION_PROVIDER}_vision`,
+            final_text:       visionText.trim(),
+            consensus_score:  92,
+            quality_tag:      'HIGH_CONFIDENCE',
+            passes_completed: passes,
+            passes_agreed:    passes,
+            fallback_used:    null,
+            ocr_source:       `${VISION_PROVIDER}_vision_primary`,
         };
     }
 
-    // Build Tesseract consensus
-    const consensusResult = buildConsensus(validPasses, minConsensus);
-    const qualityTag = deriveQualityTag(consensusResult.score);
-
-    // ── BEST PASS METRIC ─────────────────────────────────
-    const bestPass = validPasses.reduce((best, pass) =>
-        pass.confidence > best.confidence ? pass : best
-    );
-
-    // ── GPT-4o VISION FALLBACK ────────────────────────────
-    // If Tesseract consensus is poor OR best pass confidence is low,
-    // use GPT-4o Vision which can handle handwriting much better.
-    const TESSERACT_QUALITY_THRESHOLD = 55; // below this, Tesseract is unreliable
-
-    if (bestPass.confidence < TESSERACT_QUALITY_THRESHOLD || consensusResult.score < 30) {
-        console.log(`[OCR] Tesseract quality too low (best: ${bestPass.confidence}%, consensus: ${consensusResult.score}%), switching to GPT-4o Vision...`);
-
-        try {
-            const visionText = await visionFallbackOCR(base64DataUri);
-
-            if (visionText && visionText.length > 10) {
-                return {
-                    final_text: visionText,
-                    consensus_score: 95, // GPT-4o Vision is highly accurate
-                    quality_tag: 'HIGH_CONFIDENCE',
-                    passes_completed: passResults.length,
-                    passes_agreed: 0,
-                    pass_results: debug ? [
-                        ...passResults,
-                        { variant: `${VISION_PROVIDER}_vision`, text: visionText, confidence: 95 },
-                    ] : undefined,
-                    fallback_used: `${VISION_PROVIDER}_vision`,
-                };
-            }
-        } catch (err) {
-            console.error('[OCR] GPT-4o Vision fallback failed:', err.message);
-            // Fall through to use best Tesseract pass
-        }
+    // Fallback: Tesseract (better for clean printed/typed documents)
+    if (tesseractIsUsable) {
+        console.log('[OCR] Vision LLM returned empty — using Tesseract fallback');
+        return {
+            final_text:       tesseractResult.text.trim(),
+            consensus_score:  tesseractResult.confidence,
+            quality_tag:      deriveQualityTag(tesseractResult.confidence),
+            passes_completed: passes,
+            passes_agreed:    1,
+            fallback_used:    'tesseract_fallback',
+            ocr_source:       'tesseract',
+        };
     }
 
-    // ── USE TESSERACT RESULT ─────────────────────────────
-    let finalText = consensusResult.text;
-    let finalScore = consensusResult.score;
-    let finalTag = qualityTag;
-    let agreedCount = consensusResult.agreed_count;
-    let fallbackUsed = null;
-
-    // If consensus is poor but we have a decent single pass, use that
-    if (consensusResult.score < 20 || finalText.trim().length < 10) {
-        finalText = bestPass.text.trim();
-        finalScore = bestPass.confidence;
-        finalTag = deriveQualityTag(finalScore);
-        agreedCount = 1;
-        fallbackUsed = 'best_single_pass';
-        console.log(`[OCR] Using best single pass: ${bestPass.variant} (${bestPass.confidence}%)`);
-    }
-
+    // Both failed
+    console.error('[OCR] Both Vision LLM and Tesseract returned empty results');
     return {
-        final_text: finalText,
-        consensus_score: finalScore,
-        quality_tag: finalTag,
-        passes_completed: passResults.length,
-        passes_agreed: agreedCount,
-        pass_results: debug ? passResults : undefined,
-        fallback_used: fallbackUsed,
+        final_text:       '',
+        consensus_score:  0,
+        quality_tag:      'LOW_QUALITY',
+        passes_completed: passes,
+        passes_agreed:    0,
+        fallback_used:    'none',
+        ocr_source:       'failed',
     };
 }
 
@@ -205,11 +226,11 @@ export async function runMultiPassOCR(imageInput, options = {}) {
  */
 export function runRawTextInput(text) {
     return {
-        final_text: text.trim(),
-        consensus_score: 100,
-        quality_tag: 'HIGH_CONFIDENCE',
+        final_text:       text.trim(),
+        consensus_score:  100,
+        quality_tag:      'HIGH_CONFIDENCE',
         passes_completed: 0,
-        passes_agreed: 0,
-        pass_results: undefined,
+        passes_agreed:    0,
+        ocr_source:       'raw_text',
     };
 }

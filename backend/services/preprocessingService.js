@@ -168,3 +168,50 @@ export async function preprocessInvert(buffer) {
     }
 }
 
+/**
+ * VISION PASS — Optimised specifically for Vision LLMs.
+ *
+ * Unlike Tesseract passes, vision models work BETTER with:
+ *  - High resolution (3x-4x upscale for small phone photos)
+ *  - COLOUR preserved (not grayscale — vision LLMs use colour to distinguish ink)
+ *  - Gentle sharpening (not aggressive binarization — avoids artifacts)
+ *  - Balanced brightness/contrast without thresholding
+ *
+ * This is the image sent to llava / GPT-4o / Gemini / Claude Vision.
+ */
+export async function preprocessForVision(buffer) {
+    try {
+        const metadata = await sharp(buffer).metadata();
+        let pipeline = sharp(buffer);
+
+        // Aggressive upscale — vision LLMs read fine handwriting at higher res
+        if (metadata.width) {
+            let scaleFactor = 1;
+            if (metadata.width < 800)       scaleFactor = 4;
+            else if (metadata.width < 1200) scaleFactor = 3;
+            else if (metadata.width < 2000) scaleFactor = 2;
+
+            if (scaleFactor > 1) {
+                pipeline = pipeline.resize({
+                    width: metadata.width * scaleFactor,
+                    kernel: sharp.kernel.lanczos3,
+                });
+            }
+        }
+
+        return await pipeline
+            // Normalize contrast — auto-stretch histogram for better visibility
+            .normalize()
+            // Mild contrast boost to make text stand out without losing detail
+            .linear(1.3, -(128 * 0.3))
+            // Gentle sharpening — sharpen text edges without introducing artifacts
+            .sharpen({ sigma: 1.5, m1: 1, m2: 0.5 })
+            // High-quality PNG (vision models benefit from lossless format)
+            .png({ compressionLevel: 6 })
+            .toBuffer();
+    } catch (err) {
+        console.error('[preprocessForVision] Error, using original:', err.message);
+        return buffer;
+    }
+}
+
