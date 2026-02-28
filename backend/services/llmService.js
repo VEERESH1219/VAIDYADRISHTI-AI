@@ -1,15 +1,21 @@
 /**
  * VAIDYADRISHTI AI — Unified LLM Adapter Service
  *
- * Supports four LLM providers out of the box:
- *   - openai    : GPT-4o (default)    — requires OPENAI_API_KEY
- *   - anthropic : Claude Sonnet 4.6   — requires ANTHROPIC_API_KEY
- *   - gemini    : Gemini 2.0 Flash    — requires GEMINI_API_KEY
- *   - ollama    : Local models (free) — requires Ollama running at OLLAMA_ENDPOINT
+ * Supports five providers out of the box:
+ *   - google    : Google Cloud Vision API — BEST OCR quality, free 1000/month
+ *                 requires GOOGLE_VISION_API_KEY (get free at console.cloud.google.com)
+ *   - gemini    : Gemini 2.0 Flash       — free 1500/day, fast, excellent vision
+ *                 requires GEMINI_API_KEY (free at aistudio.google.com)
+ *   - openai    : GPT-4o                 — best overall, paid
+ *                 requires OPENAI_API_KEY
+ *   - anthropic : Claude Sonnet 4.6      — excellent quality, paid
+ *                 requires ANTHROPIC_API_KEY
+ *   - ollama    : Local models (free)    — no API key, runs on your PC
+ *                 requires Ollama running at OLLAMA_ENDPOINT
  *
  * Switch provider with MODEL_PROVIDER env var (see .env.example).
- * Vision OCR can use a separate provider via VISION_PROVIDER env var.
- * Ollama vision uses OLLAMA_VISION_MODEL (default: llava).
+ * Vision OCR uses a separate provider via VISION_PROVIDER env var.
+ * For best prescription OCR: VISION_PROVIDER=google (free, purpose-built OCR)
  *
  * NO-API-KEY SETUP: Set MODEL_PROVIDER=ollama and VISION_PROVIDER=ollama
  * to run entirely local with no paid API keys.
@@ -42,8 +48,10 @@ export function resolveProvider() {
 
 export function resolveVisionProvider() {
     if (process.env.VISION_PROVIDER) return process.env.VISION_PROVIDER.toLowerCase();
+    // Auto-pick best available vision provider
+    if (process.env.GOOGLE_VISION_API_KEY) return 'google';   // best OCR quality
+    if (process.env.GEMINI_API_KEY)        return 'gemini';   // free, fast, excellent
     const p = resolveProvider();
-    // Ollama, Anthropic, and Gemini support vision; everything else falls back to openai
     return ['anthropic', 'gemini', 'ollama'].includes(p) ? p : 'openai';
 }
 
@@ -274,6 +282,42 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     const base64Raw = match?.[2] || base64DataUri;
     // Anthropic only accepts these media types
     const anthropicMime = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime;
+
+    // ── Google Cloud Vision (DOCUMENT_TEXT_DETECTION) ──────────────────────
+    // Purpose-built OCR engine — best quality for handwritten prescriptions.
+    // Free tier: 1000 units/month. Get key at console.cloud.google.com
+    if (VISION_PROVIDER === 'google') {
+        const apiKey = process.env.GOOGLE_VISION_API_KEY;
+        if (!apiKey) throw new Error('GOOGLE_VISION_API_KEY is not set in .env');
+
+        console.log('[OCR] Using Google Cloud Vision (DOCUMENT_TEXT_DETECTION)...');
+        const url  = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+        const body = {
+            requests: [{
+                image:    { content: base64Raw },
+                features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
+                imageContext: {
+                    languageHints: ['en', 'hi'],  // English + Hindi for Indian prescriptions
+                },
+            }],
+        };
+
+        const res  = await fetch(url, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(`Google Vision API error ${res.status}: ${err?.error?.message || res.statusText}`);
+        }
+
+        const data = await res.json();
+        const text = data.responses?.[0]?.fullTextAnnotation?.text || '';
+        console.log(`[OCR] Google Vision result (${text.length} chars):\n`, text.slice(0, 400));
+        return text;
+    }
 
     // ── Anthropic Vision ───────────────────────────────────────────────────
     if (VISION_PROVIDER === 'anthropic') {
