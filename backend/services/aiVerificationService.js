@@ -1,26 +1,17 @@
 /**
- * MedMap AI — AI Verification Service (Stage 4 Fallback)
+ * VAIDYADRISHTI AI — AI Verification Service (Stage 4 Fallback)
  *
  * This service is triggered when the internal database has no match.
  * It uses a chain of reputable sources:
- *   1. OpenAI Knowledge Base (Primary)
- *   2. Web Source: OpenFDA API
- *   3. Web Source: RxNorm API
+ *   1. Web Source: OpenFDA API
+ *   2. Web Source: RxNorm API
+ *   3. AI Knowledge Base (configured LLM — openai, anthropic, gemini, or ollama)
  */
 
-import OpenAI from 'openai';
+import { chatJSON, chatText, PROVIDER } from './llmService.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
-const isLocalLLM = process.env.USE_LOCAL_LLM === 'true';
-
-const openai = new OpenAI({
-    apiKey: isLocalLLM ? 'ollama' : (process.env.OPENAI_API_KEY || 'fake-key'),
-    baseURL: isLocalLLM ? process.env.LOCAL_LLM_ENDPOINT : undefined,
-});
-
-const MODEL_NAME = isLocalLLM ? (process.env.LLM_MODEL_NAME || 'mistral') : 'gpt-4o';
 
 /**
  * Helper: Universal fetch with timeout to prevent hangs.
@@ -40,11 +31,13 @@ async function fetchWithTimeout(url, timeoutLimit = 4000) {
 }
 
 /**
- * 1. OpenAI Knowledge Base (GPT-4o)
+ * 1. AI Knowledge Base (uses configured LLM provider)
  */
-async function lookupOpenAI(brandName, variant, form) {
-    const query = [brandName, variant, form].filter(Boolean).join(' ');
-    console.log(`[Stage4-OpenAI] Verifying: "${query}"...`);
+async function lookupAI(brandName, variant, form) {
+    // Do NOT include form in the query — let AI determine the correct form from knowledge.
+    // Passing the NLP-guessed form would bias the result (e.g. "Amoxicillin 625 Capsule" → AI echoes Capsule)
+    const query = [brandName, variant].filter(Boolean).join(' ');
+    console.log(`[Stage4-AI/${PROVIDER}] Verifying: "${query}"...`);
 
     const systemPrompt = `You are a professional medical knowledge engine.
 Verify if this medicine exists in the real-world market (focusing on India/Global).
@@ -64,19 +57,9 @@ SCHEMA:
 }`;
 
     try {
-        const response = await openai.chat.completions.create({
-            model: MODEL_NAME,
-            temperature: 0,
-            response_format: isLocalLLM ? undefined : { type: 'json_object' },
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: `Verify: "${query}"` },
-            ],
-        });
-
-        const parsed = JSON.parse(response.choices[0]?.message?.content || '{}');
+        const parsed = await chatJSON(systemPrompt, `Verify: "${query}"`, 0);
         if (parsed.exists && parsed.confidence >= 90) {
-            console.log(`[Stage4-OpenAI] ✓ Match found: "${parsed.official_brand}"`);
+            console.log(`[Stage4-AI/${PROVIDER}] ✓ Match found: "${parsed.official_brand}"`);
             return {
                 id: `ai_v_${Date.now()}`,
                 brand_name: parsed.official_brand,
@@ -85,11 +68,11 @@ SCHEMA:
                 form: parsed.std_form,
                 similarity_percentage: parsed.confidence,
                 confidence: 'High',
-                verified_by: 'AI Knowledge (OpenAI)'
+                verified_by: `AI Knowledge (${PROVIDER.charAt(0).toUpperCase() + PROVIDER.slice(1)})`
             };
         }
     } catch (err) {
-        console.error('[Stage4-OpenAI] Error:', err.message);
+        console.error(`[Stage4-AI/${PROVIDER}] Error:`, err.message);
     }
     return null;
 }
@@ -173,8 +156,8 @@ export async function verifyMedicineRealWorld(brandName, variant = '', form = ''
         return rxResult;
     }
 
-    // 3. OpenAI (Intelligent Cleanup & Knowledge Fallback)
-    const aiResult = await lookupOpenAI(brandName, variant, form);
+    // 3. AI Knowledge Base (Intelligent Cleanup & Knowledge Fallback)
+    const aiResult = await lookupAI(brandName, variant, form);
     if (aiResult) {
         console.log('[Stage4] ✅ Found in AI Knowledge Base.');
         return aiResult;
@@ -192,23 +175,12 @@ export async function getMedicineDescription(brandName, genericName) {
     const query = [brandName, genericName].filter(Boolean).join(' / ');
     console.log(`[Description] Generating usage for: "${query}"...`);
 
-    const systemPrompt = `You are a professional pharmacist. Provide a clean, 1-line (max 15-20 words) professional description of the primary usage/indication for the given medicine. 
-Strictly avoid common generic disclaimers (like "consult a doctor"). Just state what it treats.`;
+    const systemPrompt = `You are a professional pharmacist. Give ONE sentence (max 20 words) describing what the medicine treats. Focus on the GENERIC NAME only, not brand names. No lists, no brand comparisons, no disclaimers.`;
 
     try {
-        const response = await openai.chat.completions.create({
-            model: MODEL_NAME,
-            temperature: 0.5,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: `Describe usage for: ${query}` },
-            ],
-        });
-
-        const content = response.choices[0]?.message?.content?.trim().replace(/^"|"$/g, '');
-        return content || null;
+        return await chatText(systemPrompt, `Describe usage for: ${query}`, 0.5);
     } catch (err) {
-        console.error('[Description] OpenAI Error:', err.message);
+        console.error(`[Description] ${PROVIDER} Error:`, err.message);
         return null;
     }
 }

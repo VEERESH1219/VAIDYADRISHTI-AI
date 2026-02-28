@@ -1,61 +1,39 @@
 /**
  * VAIDYADRISHTI AI — NLP Extraction Service
  *
- * Uses OpenAI GPT-4o for clinical Named Entity Recognition.
- * Strictly follows extraction rules for brand names, variants, and dosage.
+ * Uses the configured LLM (via llmService) for clinical Named Entity Recognition.
+ * Supports: openai (GPT-4o), anthropic (Claude), gemini, ollama (local).
+ * Switch provider with MODEL_PROVIDER in .env
  */
 
-import OpenAI from 'openai';
+import { chatJSON } from './llmService.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const isLocalLLM = process.env.USE_LOCAL_LLM === 'true';
+const SYSTEM_PROMPT = `You are a medical data extraction engine. Extract medicines and diagnosis from prescription text.
 
-const openai = new OpenAI({
-  apiKey: isLocalLLM ? 'ollama' : (process.env.OPENAI_API_KEY || 'fake-key'),
-  baseURL: isLocalLLM ? process.env.LOCAL_LLM_ENDPOINT : undefined,
-});
-
-const MODEL_NAME = isLocalLLM ? (process.env.LLM_MODEL_NAME || 'mistral') : 'gpt-4o';
-
-const SYSTEM_PROMPT = `You are a strict medical data extraction engine. Your task is to extract medicine-related entities and the overall medical condition/diagnosis from the given text.
+OUTPUT: Return ONLY a valid JSON object. No explanation, no markdown, no extra text.
 
 RULES:
-1. Extract ONLY medicines, tablets, injections, capsules, and syrups.
-2. Normalize medicine names and forms.
-3. Focus on brand names and their numeric variants (suffixes like 625, 650, 500).
-4. Extract numeric suffixes as "brand_variant".
-5. Normalize frequency: BD=2, OD=1, TDS=3, SOS=1, HS=1, QID=4.
-6. Extract duration as an integer.
-7. Ignore header text, clinic details, patient names, and dates.
-8. Explicitly ignore non-drug orders: X-rays, MRI, blood tests, Physiotherapy, exercise, or lifestyle advice.
-9. High Priority: Extract the "medical_condition" or "diagnosis" (e.g., "Hypoglycemia", "Respiratory Infection", "Hypertension", "Fever"). Look for keywords like "Impression", "Imp", "Diagnosis", "Diag", "Suffering from", "C/o", or "Advised for".
-10. If multiple conditions are found, join them into a single concise string.
-11. If no medicines or diagnosis are found, return {"medicines": [], "medical_condition": null}.
+- brand_name: the medicine name (e.g. "Paracetamol", "Amoxicillin", "Cetirizine"). NEVER null if a medicine is present.
+- brand_variant: numeric strength suffix only (e.g. "500", "625", "10"). null if no numeric variant.
+- form_normalized: ONLY set if EXPLICITLY written in the text (e.g. "Tab" → "Tablet", "Cap" → "Capsule", "Inj" → "Injection", "Syr" → "Syrup"). If the form is NOT written, set null. Do NOT guess or infer.
+- frequency_per_day: integer. BD=2, OD=1, TDS=3, QID=4, HS=1, SOS=1. null if not stated.
+- duration_days: integer number of days. null if not stated.
+- medical_condition: the diagnosis or condition string. null if not found.
+- Ignore: X-rays, MRI, blood tests, physiotherapy, patient names, dates, clinic details.
 
-JSON SCHEMA:
-{
-  "medicines": [
-    {
-      "brand_name": "string",
-      "brand_variant": "string or null",
-      "form_normalized": "Tablet | Capsule | Injection | Syrup | null",
-      "frequency_per_day": integer or null,
-      "duration_days": integer or null
-    }
-  ],
-  "medical_condition": "string or null"
-}
+JSON FORMAT (return exactly this structure):
+{"medicines":[{"brand_name":"string","brand_variant":"string or null","form_normalized":"Tablet or Capsule or Injection or Syrup or null","frequency_per_day":2,"duration_days":5}],"medical_condition":"string or null"}
 
-EXAMPLE:
-Input: "Diagnosis: Type 2 Diabetes. Metformin 500mg OD x 30 days"
-Output: {
-  "medicines": [...],
-  "medical_condition": "Type 2 Diabetes"
-}
+EXAMPLE 1 (form stated in text):
+Input: "Diagnosis: Type 2 Diabetes. Tab Metformin 500mg OD x 30 days. Cap Amoxicillin 625 TDS x 7 days."
+Output: {"medicines":[{"brand_name":"Metformin","brand_variant":"500","form_normalized":"Tablet","frequency_per_day":1,"duration_days":30},{"brand_name":"Amoxicillin","brand_variant":"625","form_normalized":"Capsule","frequency_per_day":3,"duration_days":7}],"medical_condition":"Type 2 Diabetes"}
 
-NOTE: The medical_condition field is mandatory in the JSON output, even if it is null.
+EXAMPLE 2 (form NOT stated in text):
+Input: "Diagnosis: Fever. Paracetamol 500mg BD x 5 days. Amoxicillin 625mg TDS x 7 days."
+Output: {"medicines":[{"brand_name":"Paracetamol","brand_variant":"500","form_normalized":null,"frequency_per_day":2,"duration_days":5},{"brand_name":"Amoxicillin","brand_variant":"625","form_normalized":null,"frequency_per_day":3,"duration_days":7}],"medical_condition":"Fever"}
 `;
 
 /**
@@ -66,10 +44,9 @@ NOTE: The medical_condition field is mandatory in the JSON output, even if it is
  */
 export async function runNLPExtraction(ocrText) {
   if (!ocrText || ocrText.trim().length === 0) {
-    return [];
+    return { medicines: [], medical_condition: null };
   }
 
-  let response;
   let retries = 0;
   const maxRetries = 2;
 
@@ -80,19 +57,8 @@ export async function runNLPExtraction(ocrText) {
       console.log('[NLP] Input Length:', ocrText.length);
       console.log('[NLP] Full Input Text:\n', ocrText);
 
-      response = await openai.chat.completions.create({
-        model: MODEL_NAME,
-        temperature: 0,
-        response_format: isLocalLLM ? undefined : { type: 'json_object' },
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userMessage },
-        ],
-      });
-
-      const content = response.choices[0]?.message?.content || '{"medicines": [], "medical_condition": null}';
-      console.log('[NLP] Raw OpenAI Content:', content);
-      const parsed = JSON.parse(content);
+      const parsed = await chatJSON(SYSTEM_PROMPT, userMessage, 0);
+      console.log('[NLP] Parsed result:', JSON.stringify(parsed));
       const medicines = Array.isArray(parsed.medicines) ? parsed.medicines : [];
       const medicalCondition = parsed.medical_condition || null;
 

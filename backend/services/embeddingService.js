@@ -10,9 +10,12 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy client — avoids crash at startup when OPENAI_API_KEY is not yet set
+let _openai;
+function openaiClient() {
+    if (!_openai) _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    return _openai;
+}
 
 /**
  * Generate a 1536-dimension embedding for the given text.
@@ -25,12 +28,17 @@ export async function getEmbedding(text) {
         throw new Error('Cannot generate embedding for empty text.');
     }
 
+    // Skip immediately if no API key — Stage 3 vector search will be bypassed
+    if (!process.env.OPENAI_API_KEY) {
+        throw new Error('OPENAI_API_KEY not set — vector search unavailable. Falling back to Stage 4.');
+    }
+
     const maxRetries = 3;
     let lastError;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const response = await openai.embeddings.create({
+            const response = await openaiClient().embeddings.create({
                 model: 'text-embedding-3-small',
                 input: text.trim(),
             });

@@ -5,11 +5,12 @@
  * image preprocessing variants, then builds consensus from all results.
  *
  * For handwritten prescriptions where Tesseract fails, falls back to
- * GPT-4o Vision which can read handwriting directly from the image.
+ * a vision-capable LLM (GPT-4o, Claude, or Gemini) via llmService.
+ * Configure with VISION_PROVIDER in .env
  */
 
 import Tesseract from 'tesseract.js';
-import OpenAI from 'openai';
+import { visionOCR, VISION_PROVIDER } from './llmService.js';
 import dotenv from 'dotenv';
 import {
     preprocessStandard,
@@ -22,8 +23,6 @@ import { buildConsensus, deriveQualityTag } from '../utils/consensus.js';
 
 dotenv.config();
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 const PREPROCESSING_VARIANTS = [
     { name: 'standard', fn: preprocessStandard },
     { name: 'highContrast', fn: preprocessHighContrast },
@@ -32,21 +31,7 @@ const PREPROCESSING_VARIANTS = [
     { name: 'inverted', fn: preprocessInvert },
 ];
 
-/**
- * GPT-4o Vision OCR — fallback for handwritten prescriptions.
- * Sends the image directly to GPT-4o's vision capability.
- */
-async function gpt4oVisionOCR(base64DataUri) {
-    console.log('[OCR] Using GPT-4o Vision as fallback for handwritten text...');
-
-    const response = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        temperature: 0.1,
-        max_tokens: 2048,
-        messages: [
-            {
-                role: 'system',
-                content: `You are a document text extraction engine for a healthcare IT digitization system. Your task is to perform OCR — read and transcribe all visible text from the provided document image.
+const VISION_SYSTEM_PROMPT = `You are a document text extraction engine for a healthcare IT digitization system. Your task is to perform OCR — read and transcribe all visible text from the provided document image.
 
 This is used in a hospital's Electronic Health Records (EHR) system to digitize paper documents for record-keeping.
 
@@ -55,30 +40,17 @@ INSTRUCTIONS:
 2. Maintain the original line structure.
 3. For handwritten text, interpret using contextual clues. For example, in clinical shorthand: "Adv" = Advice, "C/o" = Complaints of, "Imp" = Impression, "OE" = On Examination.
 4. If you cannot read a word, write [unclear] in its place.
-5. Output ONLY the transcribed text. No commentary. No analysis. No suggestions.`,
-            },
-            {
-                role: 'user',
-                content: [
-                    {
-                        type: 'text',
-                        text: 'Please perform OCR on this document image and return the transcribed text:',
-                    },
-                    {
-                        type: 'image_url',
-                        image_url: {
-                            url: base64DataUri,
-                            detail: 'high',
-                        },
-                    },
-                ],
-            },
-        ],
-    });
+5. Output ONLY the transcribed text. No commentary. No analysis. No suggestions.`;
 
-    const text = response.choices[0]?.message?.content || '';
-    console.log('[OCR] GPT-4o Vision full result:\n', text);
-    return text.trim();
+const VISION_USER_PROMPT = 'Please perform OCR on this document image and return the transcribed text:';
+
+/**
+ * Vision LLM OCR — fallback for handwritten prescriptions.
+ * Uses the provider configured by VISION_PROVIDER in .env
+ * (default: openai/GPT-4o, also supports anthropic and gemini).
+ */
+async function visionFallbackOCR(base64DataUri) {
+    return visionOCR(base64DataUri, VISION_SYSTEM_PROMPT, VISION_USER_PROMPT);
 }
 
 /**
@@ -145,7 +117,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
 
     if (validPasses.length === 0) {
         // All Tesseract passes returned empty — use GPT-4o Vision
-        const visionText = await gpt4oVisionOCR(base64DataUri);
+        const visionText = await visionFallbackOCR(base64DataUri);
         return {
             final_text: visionText,
             consensus_score: visionText.length > 10 ? 95 : 0,
@@ -153,7 +125,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
             passes_completed: passResults.length,
             passes_agreed: 0,
             pass_results: debug ? passResults : undefined,
-            fallback_used: 'gpt4o_vision',
+            fallback_used: `${VISION_PROVIDER}_vision`,
         };
     }
 
@@ -175,7 +147,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
         console.log(`[OCR] Tesseract quality too low (best: ${bestPass.confidence}%, consensus: ${consensusResult.score}%), switching to GPT-4o Vision...`);
 
         try {
-            const visionText = await gpt4oVisionOCR(base64DataUri);
+            const visionText = await visionFallbackOCR(base64DataUri);
 
             if (visionText && visionText.length > 10) {
                 return {
@@ -186,9 +158,9 @@ export async function runMultiPassOCR(imageInput, options = {}) {
                     passes_agreed: 0,
                     pass_results: debug ? [
                         ...passResults,
-                        { variant: 'gpt4o_vision', text: visionText, confidence: 95 },
+                        { variant: `${VISION_PROVIDER}_vision`, text: visionText, confidence: 95 },
                     ] : undefined,
-                    fallback_used: 'gpt4o_vision',
+                    fallback_used: `${VISION_PROVIDER}_vision`,
                 };
             }
         } catch (err) {
