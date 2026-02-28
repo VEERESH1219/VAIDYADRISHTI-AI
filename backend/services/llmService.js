@@ -390,6 +390,61 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     return text;
 }
 
+// ── visionDirectExtract ────────────────────────────────────────────────────
+/**
+ * One-shot: Image → Structured medicine JSON.
+ *
+ * Skips the OCR→NLP two-step pipeline entirely.
+ * The vision LLM reads the prescription image and outputs a medicines JSON
+ * object directly. This is more reliable than OCR text + separate NLP
+ * because it avoids transcription errors corrupting the NLP input.
+ *
+ * Runs in PARALLEL with the OCR→NLP pipeline. The prescription route merges
+ * both results to maximise medicine recall.
+ *
+ * @param {string} base64DataUri  Full data URI
+ * @returns {Promise<{medicines: Array, medical_condition: string|null}|null>}
+ */
+export async function visionDirectExtract(base64DataUri) {
+
+    // Ultra-precise prompt: short sentences, explicit rules, no room for ambiguity.
+    // Kept intentionally brief so small models (llava 7B) can follow it reliably.
+    const SYSTEM = `You are a prescription reader. Extract medicines from the image.
+Output ONLY valid JSON — no text before or after, no markdown, no code blocks.
+
+JSON format:
+{"medicines":[{"brand_name":"NAME","brand_variant":"500","form_normalized":"Tablet","frequency_per_day":2,"duration_days":5}],"medical_condition":"CONDITION or null"}
+
+RULES:
+- brand_name: every drug/medicine name visible (brand or generic). NEVER skip one.
+- brand_variant: strength number only — "500" from "500mg". null if absent.
+- form_normalized: ONLY if written — Tab/Tab.=Tablet Cap/Cap.=Capsule Inj=Injection Syr/Syp=Syrup. null otherwise.
+- frequency_per_day integer: OD=1  BD=2  TDS=3  QID=4  SOS=1  HS=1  1-0-1=2  1-1-1=3
+- duration_days integer: 5/7=5  1/52=7  2/52=14  1/12=30. null if absent.
+- medical_condition: the Dx / diagnosis / condition line. null if not found.
+- If handwriting is unclear, make your best medical guess — never omit a medicine.`;
+
+    const USER = 'Read every medicine from this prescription image and output the JSON:';
+
+    try {
+        const raw = await visionOCR(base64DataUri, SYSTEM, USER);
+        if (!raw || raw.trim().length < 10) return null;
+
+        const parsed = extractJSON(raw);
+
+        // Validate basic structure
+        if (!parsed || !Array.isArray(parsed.medicines)) return null;
+
+        // Filter out entries without a brand_name
+        parsed.medicines = parsed.medicines.filter(m => m?.brand_name?.trim().length > 0);
+
+        return parsed.medicines.length > 0 ? parsed : null;
+    } catch (err) {
+        console.warn('[Direct Extract] Failed:', err.message);
+        return null;
+    }
+}
+
 // ── Provider info (for health checks and logs) ─────────────────────────────
 export function getLLMInfo() {
     return {
