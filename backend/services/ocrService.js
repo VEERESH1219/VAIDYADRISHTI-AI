@@ -159,27 +159,29 @@ export async function runMultiPassOCR(imageInput, options = {}) {
         base64DataUri = 'data:image/png;base64,' + imageInput.toString('base64');
     }
 
-    // Prepare a vision-optimised image (higher res, better contrast for LLM)
+    // Prepare a vision-optimised image (higher res, colour-preserved for LLM)
     const visionDataUri = await prepareForVision(imageBuffer);
 
-    // Run Vision LLM + Tesseract SIMULTANEOUSLY for speed
-    const [visionText, tesseractResult] = await Promise.all([
-        runVisionOCR(visionDataUri).catch(err => {
-            console.error('[OCR] Vision LLM error:', err.message);
-            return '';
-        }),
-        runTesseractPasses(imageBuffer, passes).catch(err => {
-            console.error('[OCR] Tesseract error:', err.message);
-            return { text: '', confidence: 0 };
-        }),
-    ]);
+    // ── Early-exit strategy ──────────────────────────────────────────────────
+    // Start Tesseract in the BACKGROUND with only 3 passes (it's just a fallback).
+    // Await Vision LLM first — if it returns good text, return IMMEDIATELY
+    // without waiting for Tesseract. This saves 10-20 seconds per scan.
+    const tesseractPromise = runTesseractPasses(imageBuffer, Math.min(passes, 3)).catch(err => {
+        console.error('[OCR] Tesseract error:', err.message);
+        return { text: '', confidence: 0 };
+    });
 
-    const visionIsUsable    = visionText && visionText.trim().length >= 25;
-    const tesseractIsUsable = tesseractResult.text && tesseractResult.text.trim().length >= 25;
+    // Await vision first
+    const visionText = await runVisionOCR(visionDataUri).catch(err => {
+        console.error('[OCR] Vision LLM error:', err.message);
+        return '';
+    });
 
-    // Vision LLM wins — it handles handwriting far better than Tesseract
-    if (visionIsUsable) {
-        console.log('[OCR] Using Vision LLM result (primary)');
+    // ── Vision succeeded → return immediately, Tesseract runs in background ──
+    if (visionText && visionText.trim().length >= 25) {
+        console.log(`[OCR] Vision LLM succeeded (${visionText.trim().length} chars) — returning immediately`);
+        // Let Tesseract finish in background but don't await it
+        tesseractPromise.catch(() => {});
         return {
             final_text:       visionText.trim(),
             consensus_score:  92,
@@ -191,14 +193,17 @@ export async function runMultiPassOCR(imageInput, options = {}) {
         };
     }
 
-    // Fallback: Tesseract (better for clean printed/typed documents)
-    if (tesseractIsUsable) {
-        console.log('[OCR] Vision LLM returned empty — using Tesseract fallback');
+    // ── Vision failed / empty → wait for Tesseract fallback ─────────────────
+    console.warn('[OCR] Vision LLM returned empty — waiting for Tesseract fallback');
+    const tesseractResult = await tesseractPromise;
+
+    if (tesseractResult.text && tesseractResult.text.trim().length >= 25) {
+        console.log('[OCR] Using Tesseract fallback result');
         return {
             final_text:       tesseractResult.text.trim(),
             consensus_score:  tesseractResult.confidence,
             quality_tag:      deriveQualityTag(tesseractResult.confidence),
-            passes_completed: passes,
+            passes_completed: 3,
             passes_agreed:    1,
             fallback_used:    'tesseract_fallback',
             ocr_source:       'tesseract',
@@ -211,7 +216,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
         final_text:       '',
         consensus_score:  0,
         quality_tag:      'LOW_QUALITY',
-        passes_completed: passes,
+        passes_completed: 3,
         passes_agreed:    0,
         fallback_used:    'none',
         ocr_source:       'failed',
