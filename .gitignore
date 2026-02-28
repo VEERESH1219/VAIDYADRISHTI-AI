@@ -6,3 +6,5 @@ dist/
 test_*.json
 ocr_output.txt
 *.traineddata
+backend/bin/
+nul
