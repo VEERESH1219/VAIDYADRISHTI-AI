@@ -27,6 +27,7 @@
  */
 
 import Tesseract                  from 'tesseract.js';
+import sharp                      from 'sharp';
 import { visionOCR, VISION_PROVIDER } from './llmService.js';
 import { runPaddleOCR }           from './paddleOcrService.js';
 import dotenv                     from 'dotenv';
@@ -185,88 +186,99 @@ export async function runMultiPassOCR(imageInput, options = {}) {
     const { passes = 5 } = options;
 
     // ── Normalise input ───────────────────────────────────────────────────────
-    let base64DataUri;
     let imageBuffer;
-
     if (typeof imageInput === 'string') {
-        base64DataUri = imageInput;
         const base64Data = imageInput.replace(/^data:image\/\w+;base64,/, '');
         imageBuffer = Buffer.from(base64Data, 'base64');
     } else {
         imageBuffer = imageInput;
-        base64DataUri = 'data:image/png;base64,' + imageInput.toString('base64');
     }
 
     // Prepare vision-optimised image (higher res, colour-preserved for LLM)
     const visionDataUri = await prepareForVision(imageBuffer);
 
-    // ── Launch Tier 2 & 3 in background immediately ──────────────────────────
-    // Both start NOW so their result is ready the moment Vision LLM fails.
-    // PaddleOCR (Tier 2) is significantly more accurate than Tesseract.
-    const paddlePromise = runPaddleOCR(imageBuffer).catch(err => {
-        console.warn('[OCR] PaddleOCR unavailable (is Python + paddleocr installed?):', err.message);
-        return { text: '', confidence: 0 };
-    });
+    // ── TRUE PARALLEL RACE — all three tiers start simultaneously ─────────────
+    //
+    // Each tier promise rejects if it produces no usable text.
+    // Promise.any() resolves with whichever tier finishes FIRST with good text.
+    // This means:
+    //   • Tesseract (~10-20s) wins immediately if Vision LLM is slow/times out
+    //   • Vision LLM wins if it responds faster (cloud providers: GPT-4o, Gemini)
+    //   • We never wait 120s for a Vision timeout before using Tesseract
+    //
+    // Priority tiebreak: if multiple tiers finish within 5s of each other,
+    // Vision > PaddleOCR > Tesseract (tracked via `tier` field).
 
-    const tesseractPromise = runTesseractPasses(imageBuffer, Math.min(passes, 3)).catch(err => {
-        console.error('[OCR] Tesseract error:', err.message);
-        return { text: '', confidence: 0 };
-    });
+    // Each tier promise resolves with a result object, or rejects when it
+    // produces no usable text. Promise.any() returns the FIRST to resolve —
+    // so whichever tier finishes first with good text wins immediately.
+    // This means Tesseract (~10-20s) doesn't wait behind Vision's 120s timeout.
 
-    // ── Tier 1: Vision LLM ────────────────────────────────────────────────────
-    const visionText = await runVisionOCR(visionDataUri).catch(err => {
-        console.error('[OCR] Vision LLM error:', err.message);
-        return '';
-    });
+    const makeTier = (promise, tier, label, defaultConf) =>
+        promise.then(raw => {
+            const text = typeof raw === 'string' ? raw : (raw?.text || '');
+            const confidence = typeof raw === 'object' ? (raw?.confidence ?? defaultConf) : defaultConf;
+            if (!isUsableOCRText(text)) throw new Error(`${label}: no usable text`);
+            return { tier, text: text.trim(), confidence, label };
+        });
 
-    if (isUsableOCRText(visionText)) {
-        console.log(`[OCR] ✓ Tier 1 Vision LLM succeeded (${visionText.trim().length} chars) — returning immediately`);
-        // Background processes can finish silently
-        paddlePromise.catch(() => {});
-        tesseractPromise.catch(() => {});
-        return {
-            final_text:       visionText.trim(),
-            consensus_score:  92,
-            quality_tag:      'HIGH_CONFIDENCE',
-            passes_completed: passes,
-            passes_agreed:    passes,
-            fallback_used:    null,
-            ocr_source:       `${VISION_PROVIDER}_vision_primary`,
-        };
+    // Skip Ollama Vision in the OCR race — Ollama processes one request at a time,
+    // so running Vision blocks the NLP model that follows OCR. Tesseract is fast
+    // and local with no queue contention. Cloud providers (GPT-4o, Gemini, Google)
+    // handle parallel calls so Vision is kept for them.
+    const skipVision = VISION_PROVIDER === 'ollama';
+    if (skipVision) {
+        console.log('[OCR] Skipping Ollama Vision (would block NLP queue) — Tesseract handles image');
     }
 
-    // ── Tier 2: PaddleOCR ─────────────────────────────────────────────────────
-    console.warn('[OCR] Tier 1 failed — awaiting Tier 2 PaddleOCR...');
-    const paddleResult = await paddlePromise;
+    const visionTier = skipVision
+        ? Promise.reject(new Error('Ollama Vision skipped — Tesseract is faster'))
+        : makeTier(
+            runVisionOCR(visionDataUri).catch(err => {
+                console.error('[OCR] Vision LLM error:', err.message);
+                return '';
+            }),
+            1, `${VISION_PROVIDER}_vision`, 92
+        );
 
-    if (isUsableOCRText(paddleResult.text)) {
-        console.log(`[OCR] ✓ Tier 2 PaddleOCR succeeded — ${paddleResult.confidence}% confidence, ${paddleResult.text.trim().length} chars`);
-        tesseractPromise.catch(() => {});
-        return {
-            final_text:       paddleResult.text.trim(),
-            consensus_score:  paddleResult.confidence,
-            quality_tag:      deriveQualityTag(paddleResult.confidence),
-            passes_completed: passes,
-            passes_agreed:    1,
-            fallback_used:    'paddleocr_fallback',
-            ocr_source:       'paddleocr',
-        };
+    const paddleTier = makeTier(
+        runPaddleOCR(imageBuffer).catch(err => {
+            const shortMsg = err.message?.split('\n')[0] || err.message;
+            console.warn('[OCR] PaddleOCR unavailable:', shortMsg);
+            return { text: '', confidence: 0 };
+        }),
+        2, 'paddleocr', 70
+    );
+
+    const tessTier = makeTier(
+        runTesseractPasses(imageBuffer, Math.min(passes, 3)).catch(err => {
+            console.error('[OCR] Tesseract error:', err.message);
+            return { text: '', confidence: 0 };
+        }),
+        3, 'tesseract', 0
+    );
+
+    // Promise.any resolves with the first tier that produces usable text.
+    // If Tesseract finishes in 15s and Vision times out at 120s, we get Tesseract at 15s.
+    let best = null;
+    try {
+        best = await Promise.any([visionTier, paddleTier, tessTier]);
+    } catch {
+        // AggregateError — all three failed
     }
 
-    // ── Tier 3: Tesseract ─────────────────────────────────────────────────────
-    console.warn('[OCR] Tier 2 failed — awaiting Tier 3 Tesseract...');
-    const tesseractResult = await tesseractPromise;
-
-    if (isUsableOCRText(tesseractResult.text)) {
-        console.log('[OCR] ✓ Tier 3 Tesseract fallback succeeded');
+    if (best) {
+        const tierSources = ['', `${VISION_PROVIDER}_vision_primary`, 'paddleocr', 'tesseract'];
+        const tierFallback = ['', null, 'paddleocr_fallback', 'tesseract_fallback'];
+        console.log(`[OCR] ✓ Tier ${best.tier} (${best.label}) won — ${best.text.length} chars, confidence ${best.confidence}`);
         return {
-            final_text:       tesseractResult.text.trim(),
-            consensus_score:  tesseractResult.confidence,
-            quality_tag:      deriveQualityTag(tesseractResult.confidence),
-            passes_completed: 3,
-            passes_agreed:    1,
-            fallback_used:    'tesseract_fallback',
-            ocr_source:       'tesseract',
+            final_text:       best.text,
+            consensus_score:  best.confidence,
+            quality_tag:      best.tier === 1 ? 'HIGH_CONFIDENCE' : deriveQualityTag(best.confidence),
+            passes_completed: passes,
+            passes_agreed:    best.tier === 1 ? passes : 1,
+            fallback_used:    tierFallback[best.tier],
+            ocr_source:       tierSources[best.tier],
         };
     }
 

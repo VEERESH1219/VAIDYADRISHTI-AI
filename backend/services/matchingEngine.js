@@ -1,15 +1,16 @@
 /**
- * VAIDYADRISHTI AI — 4-Stage Local Matching Engine
+ * VAIDYADRISHTI AI — 5-Stage Local Matching Engine (v2)
  *
- * Uses local PostgreSQL 16 with pg_trgm — no Supabase, no cloud, no API keys.
+ * Uses local PostgreSQL 16 with pg_trgm + pgvector — no cloud, no API keys required.
  *
  * STAGE 0 : Local Cache      — instant in-memory lookup (previously AI-found medicines)
- * STAGE 1 : Exact Match      — LOWER(brand_name) = LOWER(query)
- * STAGE 2 : Fuzzy Match      — pg_trgm similarity on brand_name + generic_name + ILIKE
- * STAGE 3 : AI Fallback      — Ollama → OpenFDA → RxNorm (all free/local)
+ * STAGE 1 : Exact Match      — LOWER(brand_name) = LOWER(normalized_query)
+ * STAGE 2 : Fuzzy Match      — pg_trgm similarity (threshold ≥ 50%, query ≥ 0.35)
+ * STAGE 3 : Vector Match     — pgvector cosine similarity (requires OPENAI_API_KEY)
+ * STAGE 4 : AI Fallback      — Ollama → OpenFDA → RxNorm (all free/local)
  *
- * Self-learning: High-confidence AI matches are auto-saved to local cache AND
- * inserted into PostgreSQL so they improve future scans permanently.
+ * Ambiguity detection: if top 2 results differ by < 10 points → AMBIGUOUS
+ * Self-learning: High-confidence AI matches auto-saved to cache + PostgreSQL.
  */
 
 import {
@@ -18,9 +19,11 @@ import {
     fuzzyMatch   as pgFuzzy,
     genericFuzzyMatch,
     containsMatch,
+    vectorMatch  as pgVector,
     insertMedicine,
     getMedicineCount,
 } from './pgService.js';
+import { getEmbedding } from './embeddingService.js';
 import { verifyMedicineRealWorld, getMedicineDescription } from './aiVerificationService.js';
 import { findInCache, saveToCache } from './localCacheService.js';
 import dotenv from 'dotenv';
@@ -56,7 +59,7 @@ function applyValidationRules(extraction, dbRecord, rawScore) {
         if (!hasPlus) warnings.push('COMBINATION_INTEGRITY_VIOLATION');
     }
 
-    // Form mismatch — warning only, no score penalty (OCR "Tab" ≠ DB "Tablet")
+    // Form mismatch — warning only, no score penalty
     if (extraction.form && dbRecord.form) {
         const ef = extraction.form.toLowerCase().trim();
         const df = dbRecord.form.toLowerCase().trim();
@@ -76,8 +79,8 @@ function normaliseName(name) {
         .trim();
 }
 
-// ── Minimum fuzzy score to accept a match (below this → Stage 3 AI) ──────────
-const MIN_FUZZY_ACCEPT = 30;   // trgm_score % — anything lower is likely wrong
+// ── Minimum fuzzy score to accept (below this → vector/AI stages) ────────────
+const MIN_FUZZY_ACCEPT = 50;
 
 /**
  * Returns true if the value looks like a dosage pattern (e.g. "0+0+1", "1-0-1")
@@ -90,18 +93,46 @@ function isDosagePattern(variant) {
 
 /**
  * Build the search name for DB queries.
- * Only appends brand_variant if it is a real numeric strength (not a dosage pattern).
+ * Prefers the LLM-generated normalized_query when available.
+ * Falls back to brand_name + brand_variant (if numeric, not dosage pattern).
  */
 function buildSearchName(extraction) {
+    if (extraction.normalized_query) {
+        return extraction.normalized_query;
+    }
     const useVariant = extraction.brand_variant &&
         !isDosagePattern(extraction.brand_variant) &&
-        /^\d+(\.\d+)?$/.test(extraction.brand_variant);  // purely numeric
+        /^\d+(\.\d+)?$/.test(extraction.brand_variant);
     return useVariant
         ? `${extraction.brand_name} ${extraction.brand_variant}`
         : extraction.brand_name;
 }
 
-// ── Stage 1 — Exact match ─────────────────────────────────────────────────────
+// ── Ambiguity detection ──────────────────────────────────────────────────────
+/**
+ * If the top 2 results differ by < 10 percentage points, mark as AMBIGUOUS.
+ */
+function detectAmbiguity(rows, scoreField = 'trgm_score') {
+    if (!rows || rows.length < 2) return { ambiguous: false, topCandidates: [] };
+    const score1 = parseFloat(rows[0][scoreField]) || 0;
+    const score2 = parseFloat(rows[1][scoreField]) || 0;
+
+    if (Math.abs(score1 - score2) < 10) {
+        return {
+            ambiguous: true,
+            topCandidates: rows.slice(0, 3).map(r => ({
+                brand_name: r.brand_name,
+                generic_name: r.generic_name,
+                strength: r.strength,
+                form: r.form,
+                score: parseFloat(r[scoreField]) || 0,
+            })),
+        };
+    }
+    return { ambiguous: false, topCandidates: [] };
+}
+
+// ── Stage 1 — Exact match (always wins — never overridden) ───────────────────
 async function stageExact(extraction) {
     if (!hasPostgres()) return null;
 
@@ -110,16 +141,13 @@ async function stageExact(extraction) {
 
     const rows = await pgExact(name);
     if (!rows.length) {
-        // Try brand name only (in case variant was a dosage pattern)
         const rowsOnly = name !== nameOnly ? await pgExact(nameOnly) : [];
-        // Try normalised name (strips "Tablet", "Cap", etc.)
         const norm = await pgExact(normaliseName(nameOnly));
         const firstHit = rowsOnly[0] || norm[0];
         if (!firstHit) return null;
-        return { record: firstHit, method: 'EXACT', rawScore: 100 };
+        return { record: firstHit, method: 'EXACT', rawScore: 100, ambiguous: false, topCandidates: [] };
     }
 
-    // Prefer form-matching record when multiple hits
     let chosen = rows[0];
     if (extraction.form && rows.length > 1) {
         const formHit = rows.find(r =>
@@ -128,62 +156,103 @@ async function stageExact(extraction) {
         if (formHit) chosen = formHit;
     }
 
-    return { record: chosen, method: 'EXACT', rawScore: 100 };
+    return { record: chosen, method: 'EXACT', rawScore: 100, ambiguous: false, topCandidates: [] };
 }
 
-// ── Stage 2 — Fuzzy match (trigram similarity + ILIKE) ───────────────────────
+// ── Stage 2 — Fuzzy match (trigram similarity, threshold 0.35, accept ≥ 50) ─
 async function stageFuzzy(extraction) {
     if (!hasPostgres()) return null;
 
-    // Use brand_name only if brand_variant looks like a dosage pattern (not a strength)
     const name = buildSearchName(extraction);
-    // Also always try brand_name alone as a fallback key
     const nameOnly = extraction.brand_name;
-
     const form = extraction.form || null;
 
     // 2a — Trigram on search name, then on brand_name alone
-    // Pass form so Tablet results rank above Gel/Cream for the same trigram score
     for (const q of [...new Set([name, nameOnly])]) {
-        const rows = await pgFuzzy(q, 0.18, 5, form);
+        const rows = await pgFuzzy(q, 0.35, 5, form);
         if (rows.length) {
             const best = rows[0];
             const score = parseFloat(best.trgm_score) || 0;
-            if (score < MIN_FUZZY_ACCEPT) break;  // score too low — let AI handle it
-            return { record: best, method: 'FUZZY', rawScore: score };
+            if (score < MIN_FUZZY_ACCEPT) break;
+            const { ambiguous, topCandidates } = detectAmbiguity(rows);
+            return { record: best, method: 'FUZZY', rawScore: score, ambiguous, topCandidates };
         }
     }
 
     // 2b — Trigram on normalised name (without "Tablet" etc.)
     const norm = normaliseName(nameOnly);
     if (norm !== nameOnly) {
-        const rows = await pgFuzzy(norm, 0.20, 5, form);
+        const rows = await pgFuzzy(norm, 0.35, 5, form);
         if (rows.length) {
             const score = parseFloat(rows[0].trgm_score) || 0;
             if (score >= MIN_FUZZY_ACCEPT) {
-                return { record: rows[0], method: 'FUZZY', rawScore: score };
+                const { ambiguous, topCandidates } = detectAmbiguity(rows);
+                return { record: rows[0], method: 'FUZZY', rawScore: score, ambiguous, topCandidates };
             }
         }
     }
 
-    // 2c — Trigram on generic_name (OCR may have read the ingredient instead of brand)
+    // 2c — Trigram on generic_name
     const rows2c = await genericFuzzyMatch(nameOnly, 0.30);
     if (rows2c.length) {
-        return { record: rows2c[0], method: 'FUZZY_GENERIC', rawScore: 70 };
+        const { ambiguous, topCandidates } = detectAmbiguity(rows2c);
+        return { record: rows2c[0], method: 'FUZZY_GENERIC', rawScore: 70, ambiguous, topCandidates };
     }
 
-    // 2d — ILIKE contains (only as last DB resort before AI)
-    // Pass extraction.form so Tablet results rank above Gel/Cream results
+    // 2d — ILIKE contains (last DB resort before vector/AI)
     const rows2d = await containsMatch(nameOnly, extraction.form || null);
     if (rows2d.length) {
-        return { record: rows2d[0], method: 'CONTAINS', rawScore: 60 };
+        return { record: rows2d[0], method: 'CONTAINS', rawScore: 60, ambiguous: false, topCandidates: [] };
     }
 
     return null;
 }
 
+// ── Stage 3 — Vector match (pgvector cosine similarity) ──────────────────────
+async function stageVector(extraction) {
+    if (!hasPostgres()) return null;
+
+    const searchName = buildSearchName(extraction);
+    let embedding;
+    try {
+        embedding = await getEmbedding(searchName);
+    } catch (err) {
+        console.log('[Stage 3] Vector search unavailable:', err.message);
+        return null;
+    }
+
+    const form = extraction.form || null;
+    const rows = await pgVector(embedding, 5, form);
+    if (!rows.length) return null;
+
+    const best = rows[0];
+    const cosine = parseFloat(best.similarity_score) || 0;
+    const pctScore = Math.round(cosine * 100);
+
+    if (pctScore < 50) return null;
+
+    let ambiguous = false;
+    let topCandidates = [];
+    if (rows.length >= 2) {
+        const s1 = parseFloat(rows[0].similarity_score) || 0;
+        const s2 = parseFloat(rows[1].similarity_score) || 0;
+        if (Math.abs(s1 - s2) < 0.1) {
+            ambiguous = true;
+            topCandidates = rows.slice(0, 3).map(r => ({
+                brand_name: r.brand_name,
+                generic_name: r.generic_name,
+                strength: r.strength,
+                form: r.form,
+                score: Math.round((parseFloat(r.similarity_score) || 0) * 100),
+            }));
+        }
+    }
+
+    return { record: best, method: 'VECTOR', rawScore: pctScore, ambiguous, topCandidates };
+}
+
 // ── Format a DB record into the standard matched_medicine shape ───────────────
-function formatMatch(extraction, record, method, rawScore) {
+function formatMatch(extraction, record, method, rawScore, ambiguous = false, topCandidates = []) {
     const validation = applyValidationRules(extraction, record, rawScore);
     return {
         id:                    record.id,
@@ -198,19 +267,20 @@ function formatMatch(extraction, record, method, rawScore) {
         match_method:          method,
         verified_by:           'LOCAL_POSTGRES',
         validation_warnings:   validation.warnings,
+        ambiguous,
+        requires_human_verification: ambiguous,
+        top_candidates:        ambiguous ? topCandidates : undefined,
     };
 }
 
 // ── Persist AI-discovered medicine to local cache + PostgreSQL ────────────────
 async function persistAiMatch(extraction, aiMatch) {
-    // Always save to fast in-memory cache for this session
     saveToCache({
         ...aiMatch,
-        brand_name: extraction.brand_name,   // use NLP name as lookup key
+        brand_name: extraction.brand_name,
         full_name:  aiMatch.brand_name,
     });
 
-    // Also insert into PostgreSQL so future scans find it without AI
     if (hasPostgres()) {
         const saved = await insertMedicine({
             brand_name:   extraction.brand_name,
@@ -227,7 +297,6 @@ async function persistAiMatch(extraction, aiMatch) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 export async function matchMedicines(extractions) {
-    // Log DB status once
     const dbReady = hasPostgres();
     if (dbReady) {
         const count = await getMedicineCount().catch(() => 0);
@@ -235,16 +304,14 @@ export async function matchMedicines(extractions) {
             console.log(`[Matching] Local PostgreSQL ready — ${count.toLocaleString()} medicines`);
         } else {
             console.warn('[Matching] ⚠️  PostgreSQL connected but medicines table is empty.');
-            console.warn('[Matching]    Run: npm run db:setup && npm run db:import <csv-path>');
         }
     } else {
         console.warn('[Matching] ⚠️  PostgreSQL not configured — only AI fallback available.');
-        console.warn('[Matching]    Add POSTGRES_PASSWORD to backend/.env');
     }
 
     const results = await Promise.all(extractions.map(async (extraction) => {
-        const query = extraction.brand_name;
-        console.log(`\n[Matching] ▶ "${query}"`);
+        const query = buildSearchName(extraction);
+        console.log(`\n[Matching] ▶ "${query}" (confidence: ${extraction.confidence_score ?? 'N/A'})`);
 
         let matchResult = null;
 
@@ -265,6 +332,8 @@ export async function matchMedicines(extractions) {
                 match_method:          'LOCAL_CACHE',
                 verified_by:           `Cache (${cached.verified_by || 'AI'})`,
                 validation_warnings:   [],
+                ambiguous:             false,
+                requires_human_verification: false,
             };
             const description = await getMedicineDescription(
                 matchedMedicine.brand_name, matchedMedicine.generic_name
@@ -273,7 +342,7 @@ export async function matchMedicines(extractions) {
             return buildResult(extraction, matchedMedicine);
         }
 
-        // ── STAGE 1: Exact Match ────────────────────────────────────────────
+        // ── STAGE 1: Exact Match (always wins — never overridden) ───────────
         if (!matchResult) {
             const exact = await stageExact(extraction).catch(err => {
                 console.error('[Stage 1] Error:', err.message);
@@ -285,25 +354,40 @@ export async function matchMedicines(extractions) {
             }
         }
 
-        // ── STAGE 2: Fuzzy Match ────────────────────────────────────────────
+        // ── STAGE 2: Fuzzy Match (≥ 50% trigram score) ──────────────────────
         if (!matchResult) {
             const fuzzy = await stageFuzzy(extraction).catch(err => {
                 console.error('[Stage 2] Error:', err.message);
                 return null;
             });
             if (fuzzy) {
-                console.log(`[Stage 2] ✅ Fuzzy match (${fuzzy.method}) — "${fuzzy.record.brand_name}" (${fuzzy.rawScore}%)`);
+                console.log(`[Stage 2] ✅ Fuzzy match (${fuzzy.method}) — "${fuzzy.record.brand_name}" (${fuzzy.rawScore}%)${fuzzy.ambiguous ? ' ⚠️ AMBIGUOUS' : ''}`);
                 matchResult = fuzzy;
             }
         }
 
-        // ── STAGE 3: AI Fallback ────────────────────────────────────────────
+        // ── STAGE 3: Vector Match (pgvector, ≥ 50%) ────────────────────────
+        if (!matchResult) {
+            const vector = await stageVector(extraction).catch(err => {
+                console.error('[Stage 3] Error:', err.message);
+                return null;
+            });
+            if (vector) {
+                console.log(`[Stage 3] ✅ Vector match — "${vector.record.brand_name}" (${vector.rawScore}%)${vector.ambiguous ? ' ⚠️ AMBIGUOUS' : ''}`);
+                matchResult = vector;
+            }
+        }
+
+        // ── STAGE 4: AI Fallback ────────────────────────────────────────────
         let matchedMedicine = null;
 
         if (matchResult) {
-            matchedMedicine = formatMatch(extraction, matchResult.record, matchResult.method, matchResult.rawScore);
+            matchedMedicine = formatMatch(
+                extraction, matchResult.record, matchResult.method, matchResult.rawScore,
+                matchResult.ambiguous, matchResult.topCandidates
+            );
         } else {
-            console.log(`[Stage 3] 🤖 No DB hit for "${query}" — calling AI...`);
+            console.log(`[Stage 4] 🤖 No DB/vector hit for "${query}" — calling AI...`);
             const aiMatch = await verifyMedicineRealWorld(
                 extraction.brand_name,
                 extraction.brand_variant,
@@ -311,17 +395,18 @@ export async function matchMedicines(extractions) {
             ).catch(() => null);
 
             if (aiMatch) {
-                console.log(`[Stage 3] ✅ AI found: "${aiMatch.brand_name}"`);
+                console.log(`[Stage 4] ✅ AI found: "${aiMatch.brand_name}"`);
                 matchedMedicine = aiMatch;
+                matchedMedicine.ambiguous = false;
+                matchedMedicine.requires_human_verification = false;
 
-                // Self-learning — only persist high-confidence AI hits
                 if (aiMatch.confidence === 'High') {
                     await persistAiMatch(extraction, aiMatch).catch(() => {});
                 }
             }
         }
 
-        // ── Description enrichment (uses Ollama — local, free) ──────────────
+        // ── Description enrichment ──────────────────────────────────────────
         if (matchedMedicine) {
             const description = await getMedicineDescription(
                 matchedMedicine.brand_name,

@@ -39,9 +39,17 @@ async function main() {
         await client.connect();
         console.log('✅  Connected to PostgreSQL');
 
-        // 1. pg_trgm extension — enables similarity() and GIN trgm indexes
+        // 1a. pg_trgm extension — enables similarity() and GIN trgm indexes
         await client.query('CREATE EXTENSION IF NOT EXISTS pg_trgm');
         console.log('✅  pg_trgm extension enabled');
+
+        // 1b. pgvector extension — enables vector similarity search (optional)
+        try {
+            await client.query('CREATE EXTENSION IF NOT EXISTS vector');
+            console.log('✅  pgvector extension enabled');
+        } catch (err) {
+            console.warn('⚠️   pgvector not available (vector search Stage 3 will be skipped):', err.message);
+        }
 
         // 2. medicines table
         await client.query(`
@@ -57,6 +65,17 @@ async function main() {
             )
         `);
         console.log('✅  medicines table ready');
+
+        // 2b. Add embedding column for vector search (pgvector, optional)
+        try {
+            await client.query(`
+                ALTER TABLE medicines
+                ADD COLUMN IF NOT EXISTS embedding vector(1536)
+            `);
+            console.log('✅  embedding column ready');
+        } catch (err) {
+            console.warn('⚠️   Could not add embedding column (pgvector may not be installed):', err.message);
+        }
 
         // 3. Exact-match index (B-tree on lower-cased brand_name)
         await client.query(`

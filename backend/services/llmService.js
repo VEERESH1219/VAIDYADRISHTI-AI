@@ -104,14 +104,32 @@ function geminiAI() {
     return _gemini;
 }
 
+// ── Ollama timeout (seconds) — prevents llava hanging for 5+ minutes ─────
+// Default 30s for vision (large images), 60s for text chat
+const OLLAMA_VISION_TIMEOUT_MS = parseInt(process.env.OLLAMA_VISION_TIMEOUT_S || '30', 10) * 1000;
+const OLLAMA_CHAT_TIMEOUT_MS   = parseInt(process.env.OLLAMA_TIMEOUT_S || '60', 10) * 1000;
+
 // ── Ollama connection error helper ────────────────────────────────────────
 // Wraps any Ollama API call and translates common errors into clear messages.
-async function ollamaCall(fn) {
+// Uses AbortController so the actual HTTP request is cancelled on timeout —
+// this frees Ollama to process other requests immediately.
+async function ollamaCall(fn, timeoutMs = OLLAMA_CHAT_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-        return await fn();
+        const result = await fn(controller.signal);
+        clearTimeout(timer);
+        return result;
     } catch (err) {
+        clearTimeout(timer);
         const msg  = String(err?.cause?.message || err?.message || '');
         const code = err?.cause?.code || err?.code || '';
+
+        // AbortError = our timeout fired
+        if (err?.name === 'AbortError' || msg.includes('This operation was aborted')) {
+            throw new Error(`Ollama timed out after ${timeoutMs / 1000}s — model may be too slow for this input`);
+        }
 
         // Ollama server not running (ECONNREFUSED / fetch failed)
         if (code === 'ECONNREFUSED' || msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
@@ -177,14 +195,14 @@ export async function chatJSON(systemPrompt, userPrompt, temperature = 0) {
 
     // ── Ollama ─────────────────────────────────────────────────────────────
     if (PROVIDER === 'ollama') {
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    CHAT_MODEL,
             options:  { temperature },
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user',   content: userPrompt   },
             ],
-        }));
+        }, { signal }));
         return extractJSON(response.message?.content || '{}');
     }
 
@@ -237,14 +255,14 @@ export async function chatText(systemPrompt, userPrompt, temperature = 0.5) {
 
     // ── Ollama ─────────────────────────────────────────────────────────────
     if (PROVIDER === 'ollama') {
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    CHAT_MODEL,
             options:  { temperature },
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user',   content: userPrompt   },
             ],
-        }));
+        }, { signal }));
         return response.message?.content?.trim().replace(/^"|"$/g, '') || null;
     }
 
@@ -361,14 +379,14 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     // ── Ollama Vision (local, no API key required) ─────────────────────────
     if (VISION_PROVIDER === 'ollama') {
         console.log(`[OCR] Using Ollama Vision (${VISION_MODEL}) as fallback…`);
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    VISION_MODEL,
             messages: [{
                 role:    'user',
                 content: `${systemPrompt}\n\n${userPrompt}`,
                 images:  [base64Raw],
             }],
-        }));
+        }, { signal }), OLLAMA_VISION_TIMEOUT_MS);
         const text = response.message?.content?.trim() || '';
         console.log('[OCR] Ollama Vision result:\n', text);
         return text;

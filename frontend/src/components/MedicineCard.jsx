@@ -15,13 +15,14 @@ const CONF = {
 export default function MedicineCard({ extraction, index }) {
     const [barW, setBarW] = useState(0);
 
-    const { structured_data: sd, matched_medicine: mm, fallback_required } = extraction;
+    const { structured_data: sd, matched_medicine: mm, fallback_required, ambiguous, requires_human_verification } = extraction;
     const hasMatch = !!mm;
     const conf = mm?.confidence ?? 'Low';
     const sim = mm?.similarity_percentage ?? 0;
     const C = CONF[conf] || CONF.Low;
     const isLocalCache = mm?.match_method === 'LOCAL_CACHE' || mm?.match_method === 'CACHE';
     const isAI = !isLocalCache && (mm?.verified_by?.toLowerCase().includes('ai') || mm?.verified_by?.toLowerCase().includes('openai'));
+    const isAmbiguous = ambiguous || mm?.ambiguous;
 
     // Accent stripe color
     const accent = !hasMatch ? '#ef4444' : isAI ? '#10b981' : '#10b981';
@@ -116,6 +117,14 @@ export default function MedicineCard({ extraction, index }) {
                                 borderRadius: 999, padding: '3px 10px', fontSize: 9,
                                 fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
                             }}>AI Stage 4</span>
+                        )}
+                        {isAmbiguous && (
+                            <span style={{
+                                background: 'rgba(245,158,11,0.12)', color: '#fbbf24',
+                                border: '1px solid rgba(245,158,11,0.3)',
+                                borderRadius: 999, padding: '3px 10px', fontSize: 9,
+                                fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase',
+                            }}>Ambiguous — Verify</span>
                         )}
                     </div>
                 </div>

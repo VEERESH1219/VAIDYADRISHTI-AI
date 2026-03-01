@@ -22,17 +22,23 @@ All AI processing runs on **Ollama** (free, local LLMs). No OpenAI key, no cloud
 ```
 [Image / Text Input]
         ↓
-  ┌─────────────────────────────────────┐
-  │    3-Tier OCR Engine                │
-  │  Tier 1: Vision LLM (llava-llama3) │  ← Best quality
-  │  Tier 2: PaddleOCR (Python)        │  ← Fast fallback
-  │  Tier 3: Tesseract.js (5 passes)   │  ← Last resort
-  └─────────────────────────────────────┘
+  ┌──────────────────────────────────────────────┐
+  │    3-Tier OCR Engine (parallel race)         │
+  │                                              │
+  │  Tier 1: Vision LLM                         │
+  │    • Cloud (GPT-4o/Gemini/Google): enabled  │
+  │    • Ollama: SKIPPED (blocks NLP queue)      │
+  │                                              │
+  │  Tier 2: PaddleOCR (Python subprocess)      │  ← Printed text
+  │                                              │
+  │  Tier 3: Tesseract.js (3-pass consensus)    │  ← Always available
+  │                                              │
+  │  → First tier with usable text wins (race)  │
+  └──────────────────────────────────────────────┘
         ↓
-  Dual-Path Parallel Extraction:
-  Path A: OCR text → llama3.2 NLP → medicines list
-  Path B: Image → llava-llama3 → direct medicine JSON
-  (results are merged — union of both paths)
+  Extraction:
+  • Ollama: single-path (OCR text → llama3.2 NLP → medicines)
+  • Cloud:  dual-path (Path A: OCR→NLP  +  Path B: Vision→JSON, merged)
         ↓
   ┌──────────────────────────────────────────┐
   │   5-Stage Hybrid Matching Engine         │
@@ -198,7 +204,7 @@ Open http://localhost:5173 in your browser.
 2. Click **Upload Image** and upload a prescription photo (JPG, PNG, WebP up to 10MB)
    — or click **Paste Text** and type/paste the prescription text directly
 3. Click **Analyze Prescription**
-4. Wait for the pipeline to complete (15–120 seconds depending on model load)
+4. Wait for the pipeline to complete (~20–35 seconds with Ollama; ~5–10s with cloud providers)
 5. Results show each medicine with:
    - Match confidence percentage
    - Match source badge (⚡ Cached / DB Exact / DB Fuzzy / AI Stage 4)
@@ -209,16 +215,28 @@ Open http://localhost:5173 in your browser.
 
 ## Known Issues & Limitations
 
-### ❌ Image Upload — Slow & Unreliable on Low-end Hardware
+### ✅ Image Upload — Fixed (Tesseract-first for Ollama)
 
-**Status: Partially Working**
+**Status: Working (~20–35s)**
 
-Vision LLM (`llava-llama3`) is the primary OCR method for handwritten prescriptions, but:
+The image OCR pipeline was completely overhauled after diagnosing several blocking issues:
 
-- **First-run cold start**: llava-llama3 takes 30–120 seconds to load into Ollama on the first request. Subsequent requests are faster (~15–30s).
-- **Large images crash Ollama**: Phone photos at full resolution (3024×4032px) caused `fetch failed` crashes. **Fixed** in this version — images are now auto-downscaled to ≤1280px and converted to JPEG before being sent to Ollama.
-- **Very small images**: Images smaller than 600px on the shortest side are upscaled before OCR.
-- **Blank/white images**: If the image has no readable text, Vision LLM may time out (> 2 minutes). The system will fall back to Tesseract which also returns empty.
+**Root causes found and fixed:**
+
+| Bug | Cause | Fix |
+|-----|-------|-----|
+| All Tesseract passes failed silently | `sharp` was not imported in `ocrService.js` — `ReferenceError` caught as "buffer unreadable" | Added `import sharp from 'sharp'` |
+| Image requests took 330+ seconds | Two parallel Ollama Vision calls (Path A OCR + Path B Direct) serialized inside Ollama's single-request queue — each timed out at 120s, then waited for the other | Ollama = single-path (no Path B); cloud providers = dual-path |
+| Ollama Vision blocked NLP | `Promise.any` resolved with Tesseract in ~15s, but the pending Ollama Vision HTTP request held Ollama's queue — the NLP call (also Ollama) had to wait | Ollama Vision tier is now **skipped entirely** for `VISION_PROVIDER=ollama`; Tesseract handles images |
+| Server crash on corrupt images | Tesseract.js v7 throws via `process.nextTick(() => { throw err })` on unreadable buffers, bypassing all try/catch | Sharp buffer validation before each Tesseract pass + `uncaughtException` handler in server.js |
+
+**Current performance (Ollama setup):**
+- Image OCR via Tesseract: ~5–10s
+- NLP extraction (llama3.2): ~15–25s
+- DB matching: ~2–5s
+- **Total: ~20–35s** (down from 330s+)
+
+**Note on Vision LLM quality:** Tesseract works well for printed text. For handwritten prescriptions it achieves 30–70% confidence depending on clarity. If you need better handwriting recognition, switch to a cloud provider — `VISION_PROVIDER=gemini` (free, 1500/day) is recommended.
 
 ### ❌ PaddleOCR — OneDNN Crash on Windows
 
@@ -306,7 +324,26 @@ npm run ollama:pull   # Pull llama3.2 + llava-llama3 models
 
 ## Changelog
 
-### v4.0 — Local PostgreSQL + 3-Tier OCR + Crash Fixes (Current)
+### v5.0 — OCR Pipeline Overhaul + 12× Speed Improvement (Current)
+
+**Image pipeline — root cause fixes:**
+- **`sharp` import missing in `ocrService.js`**: `sharp` was used for buffer validation but never imported. Every Tesseract preprocessing variant silently failed with `ReferenceError` caught as "buffer unreadable, skipping". Fixed — Tesseract now works correctly.
+- **Ollama queue serialization**: Running two Ollama Vision calls in parallel (Path A OCR + Path B Direct) caused them to queue serially inside Ollama's single-request processor. Each timed out at 120s, giving 330s+ total. Fixed — for `VISION_PROVIDER=ollama`, Path B is disabled and Ollama Vision is skipped in the OCR tier entirely.
+- **OCR pipeline race**: Replaced sequential waterfall (await Vision → await PaddleOCR → await Tesseract) with `Promise.any` race. Whichever tier produces usable text first wins immediately.
+- **Ollama AbortController**: Added `AbortController` + `AbortSignal` to all Ollama SDK calls so HTTP connections are actually cancelled on timeout (not just rejected on the Node.js side).
+- **Ollama Vision timeout**: Reduced from unlimited to 30s (`OLLAMA_VISION_TIMEOUT_S` env var) for vision, 60s for chat.
+- **Performance result**: Image processing time went from **330s → 27s** (12× improvement) on Ollama local setup.
+
+**NLP + Matching (5-step engine):**
+- **Strict 5-step NLP normalization**: Raw → Cleaned → Abbreviation-expanded → Extracted → `normalized_query` output
+- **`mapToInternalFormat()` adapter**: Converts new NLP fields (`detected_name`, `strength`, `dosage_form`) to internal format — zero downstream changes needed
+- **`normalized_query` for matching**: Matching engine now uses NLP-generated `normalized_query` instead of raw OCR text
+- **Ambiguity detection**: When top 2 DB match scores differ by < 10 points → `ambiguous: true`, `requires_human_verification: true`, `top_candidates` array returned
+- **MIN_FUZZY_ACCEPT raised 30→50**: Fewer wrong low-confidence matches
+- **Vector search (Stage 3)**: Added pgvector cosine similarity search between fuzzy and AI fallback stages
+- **Ambiguity badge**: Frontend medicine cards now show "Ambiguous — Verify" badge when flagged
+
+### v4.0 — Local PostgreSQL + 3-Tier OCR + Crash Fixes
 
 **OCR Engine:**
 - **3-Tier OCR**: Vision LLM (llava-llama3) → PaddleOCR → Tesseract.js, in order of quality

@@ -20,7 +20,7 @@ import { Router } from 'express';
 import { runMultiPassOCR, runRawTextInput } from '../services/ocrService.js';
 import { runNLPExtraction } from '../services/nlpService.js';
 import { matchMedicines } from '../services/matchingEngine.js';
-import { visionDirectExtract } from '../services/llmService.js';
+import { visionDirectExtract, VISION_PROVIDER } from '../services/llmService.js';
 import { randomUUID } from 'crypto';
 import dotenv from 'dotenv';
 
@@ -100,37 +100,52 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
             medical_condition = nlp.medical_condition;
         }
 
-        // ── IMAGE INPUT — dual-path parallel extraction ───────────────────────
+        // ── IMAGE INPUT ───────────────────────────────────────────────────────
         if (image) {
-            console.log('[Route] Starting dual-path extraction (Path A: OCR→NLP, Path B: Direct)');
+            // Dual-path strategy depends on the Vision provider:
+            //
+            //   Cloud providers (openai, anthropic, gemini, google) can handle
+            //   parallel requests — run Path A (OCR→NLP) and Path B (Direct)
+            //   simultaneously for maximum medicine recall.
+            //
+            //   Local Ollama processes ONE request at a time. Running two
+            //   parallel Ollama vision calls serializes them and doubles latency.
+            //   For Ollama: single-path only (Path A, which already uses Tesseract
+            //   as its fast local fallback).
+            //
+            const useDirectPath = VISION_PROVIDER !== 'ollama';
 
-            // Both paths run simultaneously — zero extra latency
-            const [
-                ocrRes,
-                directRes,
-            ] = await Promise.all([
-                // Path A: Vision OCR → transcribed text
-                runMultiPassOCR(image, {
-                    passes:      options.ocr_passes  || 5,
-                    minConsensus: options.min_consensus || 2,
-                    debug:       options.debug_passes || false,
-                }),
-                // Path B: Vision LLM → medicine JSON directly from image
-                visionDirectExtract(image).catch(err => {
+            if (useDirectPath) {
+                console.log('[Route] Starting dual-path extraction (Path A: OCR→NLP, Path B: Direct)');
+            } else {
+                console.log('[Route] Starting single-path extraction (Ollama: Path A only)');
+            }
+
+            let directPromise = useDirectPath
+                ? visionDirectExtract(image).catch(err => {
                     console.warn('[Route] Direct extraction failed (non-fatal):', err.message);
                     return null;
-                }),
-            ]);
+                })
+                : Promise.resolve(null);
 
-            ocrResult = ocrRes;
+            // Path A: OCR → NLP (always runs)
+            ocrResult = await runMultiPassOCR(image, {
+                passes:       options.ocr_passes   || 5,
+                minConsensus: options.min_consensus || 2,
+                debug:        options.debug_passes  || false,
+            });
 
-            // Path A: run NLP on OCR text
-            const { medicines: nlpMeds, medical_condition: nlpCondition } =
-                await runNLPExtraction(ocrResult.final_text);
+            // Run NLP on OCR result
+            const nlpResult = await runNLPExtraction(ocrResult.final_text);
+            const nlpMeds = nlpResult.medicines;
+            const nlpCondition = nlpResult.medical_condition;
+            if (nlpResult._cleaned_text) console.log('[Route] NLP cleaned_text:', nlpResult._cleaned_text);
+            if (nlpResult._expanded_text) console.log('[Route] NLP expanded_text:', nlpResult._expanded_text);
 
-            // Path B results
-            const directMeds      = directRes?.medicines      || [];
-            const directCondition = directRes?.medical_condition || null;
+            // Path B: collect whatever direct extraction produced
+            const directRes = await directPromise;
+            const directMeds      = directRes?.medicines          || [];
+            const directCondition = directRes?.medical_condition  || null;
 
             console.log(`[Route] Path A (OCR→NLP): ${nlpMeds.length} medicines`);
             console.log(`[Route] Path B (Direct):  ${directMeds.length} medicines`);
@@ -169,6 +184,8 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
                 structured_data:  r.structured_data,
                 matched_medicine: r.matched_medicine,
                 fallback_required: r.fallback_required || false,
+                ambiguous: r.matched_medicine?.ambiguous || false,
+                requires_human_verification: r.matched_medicine?.requires_human_verification || false,
             })),
         });
 

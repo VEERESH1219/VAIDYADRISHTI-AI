@@ -140,6 +140,36 @@ export async function containsMatch(brandName, preferredForm = null, limit = 5) 
 }
 
 /**
+ * Stage 3 — Vector similarity match (requires pgvector extension + populated embeddings)
+ * Uses cosine distance on the embedding column.
+ * When preferredForm is given, form-matching records rank first among equally-scored hits.
+ * Gracefully returns empty array if embedding column or pgvector is not available.
+ */
+export async function vectorMatch(queryEmbedding, limit = 5, preferredForm = null) {
+    try {
+        const { rows } = await getPool().query(
+            `SELECT *,
+                    1 - (embedding <=> $1::vector) AS similarity_score
+             FROM medicines
+             WHERE embedding IS NOT NULL
+             ORDER BY
+               CASE WHEN $3::text IS NOT NULL AND LOWER(form) = LOWER($3) THEN 0 ELSE 1 END,
+               embedding <=> $1::vector ASC
+             LIMIT $2`,
+            [JSON.stringify(queryEmbedding), limit, preferredForm]
+        );
+        return rows;
+    } catch (err) {
+        // pgvector not installed or embedding column missing — graceful fallback
+        if (err.message.includes('vector') || err.message.includes('embedding') || err.message.includes('type')) {
+            console.warn('[PostgreSQL] Vector search unavailable:', err.message);
+            return [];
+        }
+        throw err;
+    }
+}
+
+/**
  * Insert a newly AI-discovered medicine into local DB (self-learning).
  */
 export async function insertMedicine(med) {
