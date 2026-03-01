@@ -1,0 +1,123 @@
+[
+  {
+    "brand_name": "Cetirizine",
+    "generic_name": "CETIRIZINE HYDROCHLORIDE",
+    "strength": "",
+    "form": "",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "Web Source: OpenFDA",
+    "confidence_pct": 95,
+    "cached_at": "2026-02-28T00:19:37.530Z"
+  },
+  {
+    "brand_name": "Paracetamol",
+    "generic_name": "Paracetamol",
+    "strength": "500mg",
+    "form": "Tablet",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 99,
+    "cached_at": "2026-02-28T00:19:46.436Z"
+  },
+  {
+    "brand_name": "Pantoprazole",
+    "generic_name": "Pantoprazole",
+    "strength": "40mg",
+    "form": "Tablet",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 99,
+    "cached_at": "2026-02-28T00:19:53.728Z"
+  },
+  {
+    "brand_name": "Amoxicillin",
+    "generic_name": "Amoxicillin",
+    "strength": "625 mg",
+    "form": "Tab",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 99,
+    "cached_at": "2026-02-28T00:19:57.626Z"
+  },
+  {
+    "brand_name": "Azithromycin",
+    "generic_name": "Azithromycin",
+    "strength": "500mg",
+    "form": "Tablet",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 99,
+    "cached_at": "2026-02-28T00:42:02.121Z"
+  },
+  {
+    "brand_name": "Atgas",
+    "generic_name": "none",
+    "strength": "none",
+    "form": "none",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 100,
+    "cached_at": "2026-02-28T12:23:15.029Z"
+  },
+  {
+    "brand_name": "Hypertension",
+    "generic_name": "Hypertension",
+    "strength": "",
+    "form": "",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 100,
+    "cached_at": "2026-02-28T12:58:54.695Z"
+  },
+  {
+    "brand_name": "Doxycycline",
+    "generic_name": "Doxycycline",
+    "strength": "100mg",
+    "form": "Capsule",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 100,
+    "cached_at": "2026-02-28T14:08:38.316Z"
+  },
+  {
+    "brand_name": "Ultracal-D",
+    "generic_name": "",
+    "strength": "0.5 mg/mL",
+    "form": "Intravenous solution",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 100,
+    "cached_at": "2026-03-01T03:37:17.261Z"
+  },
+  {
+    "brand_name": "Cartilix",
+    "generic_name": "",
+    "strength": "",
+    "form": "",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 100,
+    "cached_at": "2026-03-01T03:40:34.188Z"
+  },
+  {
+    "brand_name": "Relentas",
+    "generic_name": "Cetirizine",
+    "strength": "10mg",
+    "form": "Tablet",
+    "manufacturer": "AI Discovered",
+    "is_combination": false,
+    "verified_by": "AI Knowledge (Ollama)",
+    "confidence_pct": 99,
+    "cached_at": "2026-03-01T16:40:54.848Z"
+  }
+]

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import prescriptionRouter from './routes/prescription.js';
 import { getLLMInfo } from './services/llmService.js';
+import { hasPostgres, pingDb, getMedicineCount } from './services/pgService.js';
 
 // Always load .env from the same directory as server.js (backend/)
 // regardless of where `node` was invoked from.
@@ -55,19 +56,19 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
 // ── Health Check ──────────────────────────────────
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+    const dbOnline = hasPostgres() ? await pingDb().catch(() => false) : false;
+    const medicineCount = dbOnline ? await getMedicineCount().catch(() => 0) : 0;
     res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
         version: '1.0.4',
         llm: getLLMInfo(),
-        env: {
-            frontend_url: process.env.FRONTEND_URL ? 'set' : 'not set',
-            supabase_url:  process.env.SUPABASE_URL  ? 'set' : 'not set',
-            openai_key:    process.env.OPENAI_API_KEY    ? 'set' : 'not set',
-            anthropic_key: process.env.ANTHROPIC_API_KEY ? 'set' : 'not set',
-            gemini_key:    process.env.GEMINI_API_KEY    ? 'set' : 'not set',
-        }
+        database: {
+            type:     'PostgreSQL 16 (local)',
+            status:   dbOnline ? 'connected' : 'disconnected',
+            medicines: medicineCount.toLocaleString(),
+        },
     });
 });
 
@@ -101,6 +102,25 @@ app.use((err, req, res, next) => {
         code: 'SERVER_ERROR',
         message: err.message || 'Internal server error.',
     });
+});
+
+// ── Uncaught Exception Guard ──────────────────────
+// Tesseract.js v7 emits errors via process.nextTick(() => { throw err })
+// on invalid/corrupt image buffers, which bypasses all try/catch and would
+// normally crash the entire server. Catch it here and log — it is non-fatal.
+process.on('uncaughtException', (err) => {
+    if (
+        err.message?.includes('Error attempting to read image') ||
+        err.message?.includes('Tesseract') ||
+        err.message?.includes('tesseract') ||
+        err.message?.includes('libpng') ||
+        err.message?.includes('pngload')
+    ) {
+        console.error('[Server] Tesseract worker error (non-fatal, request continues):', err.message);
+    } else {
+        // Re-throw genuinely unexpected errors so they aren't silently swallowed
+        console.error('[Server] Uncaught exception:', err);
+    }
 });
 
 // ── Start Server ──────────────────────────────────

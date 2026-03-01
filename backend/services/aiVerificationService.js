@@ -34,7 +34,9 @@ async function fetchWithTimeout(url, timeoutLimit = 4000) {
  * 1. AI Knowledge Base (uses configured LLM provider)
  */
 async function lookupAI(brandName, variant, form) {
-    const query = [brandName, variant, form].filter(Boolean).join(' ');
+    // Do NOT include form in the query — let AI determine the correct form from knowledge.
+    // Passing the NLP-guessed form would bias the result (e.g. "Amoxicillin 625 Capsule" → AI echoes Capsule)
+    const query = [brandName, variant].filter(Boolean).join(' ');
     console.log(`[Stage4-AI/${PROVIDER}] Verifying: "${query}"...`);
 
     const systemPrompt = `You are a professional medical knowledge engine.
@@ -173,8 +175,7 @@ export async function getMedicineDescription(brandName, genericName) {
     const query = [brandName, genericName].filter(Boolean).join(' / ');
     console.log(`[Description] Generating usage for: "${query}"...`);
 
-    const systemPrompt = `You are a professional pharmacist. Provide a clean, 1-line (max 15-20 words) professional description of the primary usage/indication for the given medicine. 
-Strictly avoid common generic disclaimers (like "consult a doctor"). Just state what it treats.`;
+    const systemPrompt = `You are a professional pharmacist. Give ONE sentence (max 20 words) describing what the medicine treats. Focus on the GENERIC NAME only, not brand names. No lists, no brand comparisons, no disclaimers.`;
 
     try {
         return await chatText(systemPrompt, `Describe usage for: ${query}`, 0.5);

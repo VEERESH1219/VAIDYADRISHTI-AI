@@ -1,15 +1,21 @@
 /**
  * VAIDYADRISHTI AI — Unified LLM Adapter Service
  *
- * Supports four LLM providers out of the box:
- *   - openai    : GPT-4o (default)    — requires OPENAI_API_KEY
- *   - anthropic : Claude Sonnet 4.6   — requires ANTHROPIC_API_KEY
- *   - gemini    : Gemini 2.0 Flash    — requires GEMINI_API_KEY
- *   - ollama    : Local models (free) — requires Ollama running at OLLAMA_ENDPOINT
+ * Supports five providers out of the box:
+ *   - google    : Google Cloud Vision API — BEST OCR quality, free 1000/month
+ *                 requires GOOGLE_VISION_API_KEY (get free at console.cloud.google.com)
+ *   - gemini    : Gemini 2.0 Flash       — free 1500/day, fast, excellent vision
+ *                 requires GEMINI_API_KEY (free at aistudio.google.com)
+ *   - openai    : GPT-4o                 — best overall, paid
+ *                 requires OPENAI_API_KEY
+ *   - anthropic : Claude Sonnet 4.6      — excellent quality, paid
+ *                 requires ANTHROPIC_API_KEY
+ *   - ollama    : Local models (free)    — no API key, runs on your PC
+ *                 requires Ollama running at OLLAMA_ENDPOINT
  *
  * Switch provider with MODEL_PROVIDER env var (see .env.example).
- * Vision OCR can use a separate provider via VISION_PROVIDER env var.
- * Ollama vision uses OLLAMA_VISION_MODEL (default: llava).
+ * Vision OCR uses a separate provider via VISION_PROVIDER env var.
+ * For best prescription OCR: VISION_PROVIDER=google (free, purpose-built OCR)
  *
  * NO-API-KEY SETUP: Set MODEL_PROVIDER=ollama and VISION_PROVIDER=ollama
  * to run entirely local with no paid API keys.
@@ -23,8 +29,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Ollama } from 'ollama';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-dotenv.config();
+// Load env from backend/.env regardless of which directory `node` was invoked from.
+// Without this, the module-level constants (VISION_MODEL etc.) get resolved before
+// server.js's dotenv.config() runs — causing OLLAMA_VISION_MODEL to be ignored.
+const __llmdir = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__llmdir, '../.env') });
 
 // ── Provider Resolution ────────────────────────────────────────────────────
 // Priority: MODEL_PROVIDER env var  >  USE_LOCAL_LLM legacy flag
@@ -42,8 +54,10 @@ export function resolveProvider() {
 
 export function resolveVisionProvider() {
     if (process.env.VISION_PROVIDER) return process.env.VISION_PROVIDER.toLowerCase();
+    // Auto-pick best available vision provider
+    if (process.env.GOOGLE_VISION_API_KEY) return 'google';   // best OCR quality
+    if (process.env.GEMINI_API_KEY)        return 'gemini';   // free, fast, excellent
     const p = resolveProvider();
-    // Ollama, Anthropic, and Gemini support vision; everything else falls back to openai
     return ['anthropic', 'gemini', 'ollama'].includes(p) ? p : 'openai';
 }
 
@@ -90,22 +104,53 @@ function geminiAI() {
     return _gemini;
 }
 
+// ── Ollama timeout (seconds) — prevents llava hanging for 5+ minutes ─────
+// Default 30s for vision (large images), 60s for text chat
+const OLLAMA_VISION_TIMEOUT_MS = parseInt(process.env.OLLAMA_VISION_TIMEOUT_S || '30', 10) * 1000;
+const OLLAMA_CHAT_TIMEOUT_MS   = parseInt(process.env.OLLAMA_TIMEOUT_S || '60', 10) * 1000;
+
 // ── Ollama connection error helper ────────────────────────────────────────
-// Wraps any Ollama API call and translates ECONNREFUSED into a clear message.
-async function ollamaCall(fn) {
+// Wraps any Ollama API call and translates common errors into clear messages.
+// Uses AbortController so the actual HTTP request is cancelled on timeout —
+// this frees Ollama to process other requests immediately.
+async function ollamaCall(fn, timeoutMs = OLLAMA_CHAT_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-        return await fn();
+        const result = await fn(controller.signal);
+        clearTimeout(timer);
+        return result;
     } catch (err) {
-        const msg = String(err?.cause?.message || err?.message || '');
+        clearTimeout(timer);
+        const msg  = String(err?.cause?.message || err?.message || '');
         const code = err?.cause?.code || err?.code || '';
+
+        // AbortError = our timeout fired
+        if (err?.name === 'AbortError' || msg.includes('This operation was aborted')) {
+            throw new Error(`Ollama timed out after ${timeoutMs / 1000}s — model may be too slow for this input`);
+        }
+
+        // Ollama server not running (ECONNREFUSED / fetch failed)
         if (code === 'ECONNREFUSED' || msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
             throw new Error(
-                'Ollama is not running. Please start it and retry:\n' +
-                '  1. Install Ollama: https://ollama.com/download\n' +
-                '  2. Start the server: ollama serve\n' +
-                '  3. Pull the models:  ollama pull llama3.2  &&  ollama pull llava'
+                'Ollama is not running. Please start it:\n' +
+                '  npm run ollama:serve\n' +
+                '  (or: ollama serve)'
             );
         }
+
+        // Ollama model not downloaded yet (HTTP 404 from Ollama)
+        if (err?.status_code === 404 || (msg.includes('not found') && msg.includes('model'))) {
+            const modelMatch = (err?.error || msg).match(/model ['"]?([^'"]+)['"]? not found/i);
+            const modelName  = modelMatch?.[1] || 'the model';
+            throw new Error(
+                `Ollama model "${modelName}" is not downloaded yet.\n` +
+                `Run:  npm run ollama:pull\n` +
+                `(or:  ollama pull ${modelName})`
+            );
+        }
+
         throw err;
     }
 }
@@ -150,14 +195,14 @@ export async function chatJSON(systemPrompt, userPrompt, temperature = 0) {
 
     // ── Ollama ─────────────────────────────────────────────────────────────
     if (PROVIDER === 'ollama') {
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    CHAT_MODEL,
             options:  { temperature },
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user',   content: userPrompt   },
             ],
-        }));
+        }, { signal }));
         return extractJSON(response.message?.content || '{}');
     }
 
@@ -210,14 +255,14 @@ export async function chatText(systemPrompt, userPrompt, temperature = 0.5) {
 
     // ── Ollama ─────────────────────────────────────────────────────────────
     if (PROVIDER === 'ollama') {
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    CHAT_MODEL,
             options:  { temperature },
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user',   content: userPrompt   },
             ],
-        }));
+        }, { signal }));
         return response.message?.content?.trim().replace(/^"|"$/g, '') || null;
     }
 
@@ -262,6 +307,42 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     // Anthropic only accepts these media types
     const anthropicMime = rawMime === 'image/jpg' ? 'image/jpeg' : rawMime;
 
+    // ── Google Cloud Vision (DOCUMENT_TEXT_DETECTION) ──────────────────────
+    // Purpose-built OCR engine — best quality for handwritten prescriptions.
+    // Free tier: 1000 units/month. Get key at console.cloud.google.com
+    if (VISION_PROVIDER === 'google') {
+        const apiKey = process.env.GOOGLE_VISION_API_KEY;
+        if (!apiKey) throw new Error('GOOGLE_VISION_API_KEY is not set in .env');
+
+        console.log('[OCR] Using Google Cloud Vision (DOCUMENT_TEXT_DETECTION)...');
+        const url  = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+        const body = {
+            requests: [{
+                image:    { content: base64Raw },
+                features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
+                imageContext: {
+                    languageHints: ['en', 'hi'],  // English + Hindi for Indian prescriptions
+                },
+            }],
+        };
+
+        const res  = await fetch(url, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(`Google Vision API error ${res.status}: ${err?.error?.message || res.statusText}`);
+        }
+
+        const data = await res.json();
+        const text = data.responses?.[0]?.fullTextAnnotation?.text || '';
+        console.log(`[OCR] Google Vision result (${text.length} chars):\n`, text.slice(0, 400));
+        return text;
+    }
+
     // ── Anthropic Vision ───────────────────────────────────────────────────
     if (VISION_PROVIDER === 'anthropic') {
         console.log(`[OCR] Using Claude Vision (${VISION_MODEL}) as fallback…`);
@@ -298,14 +379,14 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     // ── Ollama Vision (local, no API key required) ─────────────────────────
     if (VISION_PROVIDER === 'ollama') {
         console.log(`[OCR] Using Ollama Vision (${VISION_MODEL}) as fallback…`);
-        const response = await ollamaCall(() => ollamaClient().chat({
+        const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    VISION_MODEL,
             messages: [{
                 role:    'user',
                 content: `${systemPrompt}\n\n${userPrompt}`,
                 images:  [base64Raw],
             }],
-        }));
+        }, { signal }), OLLAMA_VISION_TIMEOUT_MS);
         const text = response.message?.content?.trim() || '';
         console.log('[OCR] Ollama Vision result:\n', text);
         return text;
@@ -331,6 +412,62 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
     const text = response.choices[0]?.message?.content?.trim() || '';
     console.log('[OCR] GPT-4o Vision full result:\n', text);
     return text;
+}
+
+// ── visionDirectExtract ────────────────────────────────────────────────────
+/**
+ * One-shot: Image → Structured medicine JSON.
+ *
+ * Skips the OCR→NLP two-step pipeline entirely.
+ * The vision LLM reads the prescription image and outputs a medicines JSON
+ * object directly. This is more reliable than OCR text + separate NLP
+ * because it avoids transcription errors corrupting the NLP input.
+ *
+ * Runs in PARALLEL with the OCR→NLP pipeline. The prescription route merges
+ * both results to maximise medicine recall.
+ *
+ * @param {string} base64DataUri  Full data URI
+ * @returns {Promise<{medicines: Array, medical_condition: string|null}|null>}
+ */
+export async function visionDirectExtract(base64DataUri) {
+
+    // Ultra-precise prompt: short sentences, explicit rules, no room for ambiguity.
+    // Kept intentionally brief so small models (llava 7B) can follow it reliably.
+    const SYSTEM = `You are a prescription reader. Extract medicines from the image.
+Output ONLY valid JSON — no text before or after, no markdown, no code blocks.
+
+JSON format:
+{"medicines":[{"brand_name":"NAME","brand_variant":"500","form_normalized":"Tablet","frequency_per_day":2,"duration_days":5}],"medical_condition":"CONDITION or null"}
+
+RULES:
+- brand_name: every drug/medicine name CLEARLY VISIBLE in the image (brand or generic).
+- brand_variant: strength number only — "500" from "500mg". null if absent.
+- form_normalized: ONLY if written — Tab/Tab.=Tablet Cap/Cap.=Capsule Inj=Injection Syr/Syp=Syrup. null otherwise.
+- frequency_per_day integer: OD=1  BD=2  TDS=3  QID=4  SOS=1  HS=1  1-0-1=2  1-1-1=3
+- duration_days integer: 5/7=5  1/52=7  2/52=14  1/12=30. null if absent.
+- medical_condition: the Dx / diagnosis / condition line. null if not found.
+- CRITICAL: NEVER guess, invent, or assume medicine names. Only include medicines you can clearly read.
+- If the image is blurry, unreadable, or no medicines are visible → return {"medicines":[],"medical_condition":null}`;
+
+    const USER = 'Read every medicine from this prescription image and output the JSON:';
+
+    try {
+        const raw = await visionOCR(base64DataUri, SYSTEM, USER);
+        if (!raw || raw.trim().length < 10) return null;
+
+        const parsed = extractJSON(raw);
+
+        // Validate basic structure
+        if (!parsed || !Array.isArray(parsed.medicines)) return null;
+
+        // Filter out entries without a brand_name
+        parsed.medicines = parsed.medicines.filter(m => m?.brand_name?.trim().length > 0);
+
+        return parsed.medicines.length > 0 ? parsed : null;
+    } catch (err) {
+        console.warn('[Direct Extract] Failed:', err.message);
+        return null;
+    }
 }
 
 // ── Provider info (for health checks and logs) ─────────────────────────────

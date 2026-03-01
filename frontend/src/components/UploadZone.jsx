@@ -1,5 +1,8 @@
 import { useState, useRef, useCallback } from 'react';
 
+const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
+const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
 export default function UploadZone({ onSubmit, disabled }) {
     const [inputMode, setInputMode] = useState('image'); // 'image' | 'text'
     const [file, setFile] = useState(null);
@@ -7,9 +10,6 @@ export default function UploadZone({ onSubmit, disabled }) {
     const [rawText, setRawText] = useState('');
     const [dragActive, setDragActive] = useState(false);
     const fileInputRef = useRef(null);
-
-    const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
 
     const handleFile = useCallback((selectedFile) => {
         if (!selectedFile) return;

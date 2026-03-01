@@ -42,12 +42,12 @@ export function saveToHistory(result, inputType = 'image') {
 }
 
 export function clearHistory() {
-    try { localStorage.removeItem(HISTORY_KEY); } catch { }
+    try { localStorage.removeItem(HISTORY_KEY); } catch { /* ignore storage errors */ }
 }
 
 export function deleteHistoryEntry(id) {
     try {
         const updated = getHistory().filter(h => h.id !== id);
         localStorage.setItem(HISTORY_KEY, JSON.stringify(updated));
-    } catch { }
+    } catch { /* ignore storage errors */ }
 }
