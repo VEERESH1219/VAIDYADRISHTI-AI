@@ -11,7 +11,10 @@
     "embeddings": "node scripts/generateEmbeddings.js",
     "ollama:setup": "node scripts/setup-ollama.js",
     "ollama:serve": "node scripts/start-ollama.js",
-    "ollama:pull": "node scripts/pull-models.js"
+    "ollama:pull": "node scripts/pull-models.js",
+    "paddle:install": "pip install \"paddleocr<3.0\" paddlepaddle",
+    "db:setup": "node scripts/setupDb.js",
+    "db:import": "node scripts/importToPostgres.js"
   },
   "keywords": [
     "medicine",
@@ -31,6 +34,7 @@
     "multer": "^2.0.2",
     "ollama": "^0.6.3",
     "openai": "^6.22.0",
+    "pg": "^8.19.0",
     "sharp": "^0.34.5",
     "tesseract.js": "^7.0.0"
   },

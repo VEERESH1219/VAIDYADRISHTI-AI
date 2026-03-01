@@ -21,26 +21,12 @@ import { runMultiPassOCR, runRawTextInput } from '../services/ocrService.js';
 import { runNLPExtraction } from '../services/nlpService.js';
 import { matchMedicines } from '../services/matchingEngine.js';
 import { visionDirectExtract } from '../services/llmService.js';
-import { createClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const router = Router();
-
-// Lazy Supabase client — avoids crash at startup when env vars are not set
-let _supabase;
-function supabaseClient() {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-        throw new Error('SUPABASE_NOT_CONFIGURED');
-    }
-    if (!_supabase) _supabase = createClient(
-        process.env.SUPABASE_URL,
-        process.env.SUPABASE_SERVICE_KEY
-    );
-    return _supabase;
-}
 
 /**
  * Merge medicines from two extraction paths.
@@ -159,7 +145,7 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
         // ── Matching — same for both input types ──────────────────────────────
         if (extractions.length === 0) {
             const processingTime = Date.now() - startTime;
-            await logExtraction(sessionId, image ? 'image' : 'text', ocrResult, [], [], processingTime);
+            logExtraction(sessionId, image ? 'image' : 'text', ocrResult, [], [], processingTime);
             return res.json({
                 status:              'success',
                 processing_time_ms:  processingTime,
@@ -171,7 +157,7 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
 
         const results = await matchMedicines(extractions);
         const processingTime = Date.now() - startTime;
-        await logExtraction(sessionId, image ? 'image' : 'text', ocrResult, extractions, results, processingTime);
+        logExtraction(sessionId, image ? 'image' : 'text', ocrResult, extractions, results, processingTime);
 
         return res.json({
             status:              'success',
@@ -196,24 +182,13 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
 });
 
 /**
- * Log extraction to Supabase audit table.
- * Silently skipped when Supabase is not configured.
+ * Log extraction summary to console for local debugging.
  */
-async function logExtraction(sessionId, inputType, ocrResult, extractions, matches, processingMs) {
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) return;
-    try {
-        await supabaseClient().from('extraction_logs').insert({
-            session_id:     sessionId,
-            input_type:     inputType,
-            raw_ocr_text:   ocrResult?.final_text,
-            consensus_score: ocrResult?.consensus_score,
-            structured_json: extractions,
-            matches_json:   matches,
-            processing_ms:  processingMs,
-        });
-    } catch (err) {
-        console.error('[Audit Log] Error:', err.message);
-    }
+function logExtraction(sessionId, inputType, ocrResult, extractions, matches, processingMs) {
+    console.log(
+        `[Log] session=${sessionId} type=${inputType} ocr_len=${ocrResult?.final_text?.length ?? 0}` +
+        ` medicines=${extractions.length} matches=${matches.length} time=${processingMs}ms`
+    );
 }
 
 export default router;

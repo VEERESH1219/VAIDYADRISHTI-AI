@@ -29,8 +29,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Ollama } from 'ollama';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 
-dotenv.config();
+// Load env from backend/.env regardless of which directory `node` was invoked from.
+// Without this, the module-level constants (VISION_MODEL etc.) get resolved before
+// server.js's dotenv.config() runs — causing OLLAMA_VISION_MODEL to be ignored.
+const __llmdir = dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: join(__llmdir, '../.env') });
 
 // ── Provider Resolution ────────────────────────────────────────────────────
 // Priority: MODEL_PROVIDER env var  >  USE_LOCAL_LLM legacy flag
@@ -416,13 +422,14 @@ JSON format:
 {"medicines":[{"brand_name":"NAME","brand_variant":"500","form_normalized":"Tablet","frequency_per_day":2,"duration_days":5}],"medical_condition":"CONDITION or null"}
 
 RULES:
-- brand_name: every drug/medicine name visible (brand or generic). NEVER skip one.
+- brand_name: every drug/medicine name CLEARLY VISIBLE in the image (brand or generic).
 - brand_variant: strength number only — "500" from "500mg". null if absent.
 - form_normalized: ONLY if written — Tab/Tab.=Tablet Cap/Cap.=Capsule Inj=Injection Syr/Syp=Syrup. null otherwise.
 - frequency_per_day integer: OD=1  BD=2  TDS=3  QID=4  SOS=1  HS=1  1-0-1=2  1-1-1=3
 - duration_days integer: 5/7=5  1/52=7  2/52=14  1/12=30. null if absent.
 - medical_condition: the Dx / diagnosis / condition line. null if not found.
-- If handwriting is unclear, make your best medical guess — never omit a medicine.`;
+- CRITICAL: NEVER guess, invent, or assume medicine names. Only include medicines you can clearly read.
+- If the image is blurry, unreadable, or no medicines are visible → return {"medicines":[],"medical_condition":null}`;
 
     const USER = 'Read every medicine from this prescription image and output the JSON:';
 
