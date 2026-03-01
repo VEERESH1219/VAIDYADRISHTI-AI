@@ -6,3 +6,7 @@ dist/
 test_*.json
 ocr_output.txt
 *.traineddata
+
+# Claude Code internal tooling
+.claude/
+.clone/
