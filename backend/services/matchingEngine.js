@@ -20,10 +20,15 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
+// Lazy Supabase client — avoids crash at startup when env vars are not yet set
+let _supabase;
+function supabaseClient() {
+    if (!_supabase) _supabase = createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_KEY
+    );
+    return _supabase;
+}
 
 /**
  * Derive confidence level from strict thresholds.
@@ -83,7 +88,7 @@ async function exactMatch(extraction) {
         ? `${extraction.brand_name} ${extraction.brand_variant}`
         : extraction.brand_name;
 
-    let query = supabase
+    let query = supabaseClient()
         .from('medicines')
         .select('*')
         .ilike('brand_name', searchName);
@@ -113,7 +118,7 @@ async function fuzzyMatch(extraction) {
         ? `${extraction.brand_name} ${extraction.brand_variant}`
         : extraction.brand_name;
 
-    const { data, error } = await supabase.rpc('hybrid_medicine_search', {
+    const { data, error } = await supabaseClient().rpc('hybrid_medicine_search', {
         query_text: searchText,
         query_vector: JSON.stringify(getZeroVector()),
         match_limit: 5,
@@ -148,7 +153,7 @@ async function vectorMatch(extraction) {
         return null;
     }
 
-    const { data, error } = await supabase.rpc('hybrid_medicine_search', {
+    const { data, error } = await supabaseClient().rpc('hybrid_medicine_search', {
         query_text: searchText,
         query_vector: JSON.stringify(embedding),
         match_limit: 5,
@@ -283,7 +288,7 @@ async function persistExternalMatch(aiMatch) {
         console.log(`[Training] Persisting new medicine: "${aiMatch.brand_name}"...`);
 
         // 1. Check if it somehow already exists (prevent race conditions)
-        const { data: existing } = await supabase
+        const { data: existing } = await supabaseClient()
             .from('medicines')
             .select('id')
             .ilike('brand_name', aiMatch.brand_name)
@@ -301,7 +306,7 @@ async function persistExternalMatch(aiMatch) {
         const embedding = await getEmbedding(embeddingText);
 
         // 3. Insert into medicines table
-        const { error: insertError } = await supabase
+        const { error: insertError } = await supabaseClient()
             .from('medicines')
             .insert({
                 brand_name: aiMatch.brand_name,

@@ -8,7 +8,10 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "import": "node scripts/importMedicines.js",
-    "embeddings": "node scripts/generateEmbeddings.js"
+    "embeddings": "node scripts/generateEmbeddings.js",
+    "ollama:setup": "node scripts/setup-ollama.js",
+    "ollama:serve": "node scripts/start-ollama.js",
+    "ollama:pull": "node scripts/pull-models.js"
   },
   "keywords": [
     "medicine",
@@ -18,12 +21,15 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.97.0",
     "cors": "^2.8.6",
     "csv-parse": "^6.1.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "multer": "^2.0.2",
+    "ollama": "^0.6.3",
     "openai": "^6.22.0",
     "sharp": "^0.34.5",
     "tesseract.js": "^7.0.0"

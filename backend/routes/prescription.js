@@ -17,10 +17,15 @@ dotenv.config();
 
 const router = Router();
 
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
+// Lazy Supabase client — avoids crash at startup when env vars are not yet set
+let _supabase;
+function supabaseClient() {
+    if (!_supabase) _supabase = createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_KEY
+    );
+    return _supabase;
+}
 
 router.post(['/process-prescription', '/process_prescription'], async (req, res) => {
     const startTime = Date.now();
@@ -99,7 +104,7 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res)
  */
 async function logExtraction(sessionId, inputType, ocrResult, extractions, matches, processingMs) {
     try {
-        await supabase.from('extraction_logs').insert({
+        await supabaseClient().from('extraction_logs').insert({
             session_id: sessionId,
             input_type: inputType,
             raw_ocr_text: ocrResult.final_text,
