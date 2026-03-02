@@ -4,8 +4,11 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
+
 import prescriptionRouter from './routes/prescription.js';
+import adminTenantRouter from './routes/admin/tenant.js';
 import { requireAuth } from './middleware/authMiddleware.js';
+
 import { getLLMInfo } from './services/llmService.js';
 import { hasPostgres, pingDb, getMedicineCount } from './services/pgService.js';
 
@@ -38,32 +41,30 @@ function getClientIp(req) {
     return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // Request ID + Structured Logging
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 app.use((req, res, next) => {
     req.requestId = randomUUID();
     res.setHeader('X-Request-Id', req.requestId);
 
     const startedAt = Date.now();
     res.on('finish', () => {
-        console.log(
-            JSON.stringify({
-                requestId: req.requestId,
-                method: req.method,
-                path: req.originalUrl || req.url,
-                status: res.statusCode,
-                durationMs: Date.now() - startedAt,
-            })
-        );
+        console.log(JSON.stringify({
+            requestId: req.requestId,
+            method: req.method,
+            path: req.originalUrl || req.url,
+            status: res.statusCode,
+            durationMs: Date.now() - startedAt,
+        }));
     });
 
     next();
 });
 
-// ─────────────────────────────────────────────────────────────
-// Global 45s Timeout
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Global Timeout (45s)
+// ─────────────────────────────────────────────
 app.use((req, res, next) => {
     const timeoutHandle = setTimeout(() => {
         if (res.headersSent || res.writableEnded) return;
@@ -79,9 +80,9 @@ app.use((req, res, next) => {
     next();
 });
 
-// ─────────────────────────────────────────────────────────────
-// Basic In-Memory Rate Limiter
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// In-Memory Rate Limiter
+// ─────────────────────────────────────────────
 app.use((req, res, next) => {
     if (req.path === '/health') return next();
 
@@ -90,7 +91,7 @@ app.use((req, res, next) => {
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
 
     const history = rateLimitStore.get(ip) || [];
-    const recent = history.filter((ts) => ts > windowStart);
+    const recent = history.filter(ts => ts > windowStart);
 
     if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
         return res.status(429).json({
@@ -105,13 +106,13 @@ app.use((req, res, next) => {
     next();
 });
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // CORS + Body Parsing
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 app.use(cors({
     origin: (origin, callback) => callback(null, true),
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'X-Request-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'X-Request-Id', 'X-Master-Key'],
     credentials: true,
     maxAge: 86400,
 }));
@@ -119,9 +120,9 @@ app.use(cors({
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// ─────────────────────────────────────────────────────────────
-// Health (Public)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Public Health Route
+// ─────────────────────────────────────────────
 app.get('/health', async (req, res, next) => {
     try {
         const dbOnline = hasPostgres() ? await pingDb().catch(() => false) : false;
@@ -144,14 +145,19 @@ app.get('/health', async (req, res, next) => {
     }
 });
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Admin Tenant Route (Master Key Protected)
+// ─────────────────────────────────────────────
+app.use('/admin', adminTenantRouter);
+
+// ─────────────────────────────────────────────
 // Protected API Routes (JWT Required)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 app.use('/api', requireAuth, prescriptionRouter);
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 // 404 Handler
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
 app.use((req, res) => {
     const origin = sanitizeHeaderValue(req.headers.origin);
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -164,9 +170,9 @@ app.use((req, res) => {
     });
 });
 
-// ─────────────────────────────────────────────────────────────
-// Centralized Error Handler
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// Central Error Handler
+// ─────────────────────────────────────────────
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
 
