@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "import": "node scripts/importMedicines.js",
     "embeddings": "node scripts/generateEmbeddings.js",
     "ollama:setup": "node scripts/setup-ollama.js",
@@ -31,6 +34,7 @@
     "csv-parse": "^6.1.0",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
     "multer": "^2.0.2",
     "ollama": "^0.6.3",
     "openai": "^6.22.0",
@@ -40,6 +44,9 @@
     "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "@vitest/coverage-v8": "^4.0.18",
+    "nodemon": "^3.1.14",
+    "supertest": "^7.2.2",
+    "vitest": "^4.0.18"
   }
 }
