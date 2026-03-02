@@ -203,3 +203,24 @@ export async function getMedicineCount() {
         return 0;
     }
 }
+
+export async function insertPrescriptionLog({
+    tenantId,
+    userId,
+    rawInput,
+    extractedCount
+}) {
+    if (!hasPostgres()) return;
+
+    const query = `
+        INSERT INTO prescription_logs (tenant_id, user_id, raw_input, extracted_count)
+        VALUES ($1, $2, $3, $4)
+    `;
+
+    await pool.query(query, [
+        tenantId,
+        userId,
+        rawInput,
+        extractedCount
+    ]);
+}
