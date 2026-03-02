@@ -8,3 +8,5 @@ ocr_output.txt
 *.traineddata
 backend/bin/
 nul
+.claude/
+.clone/
