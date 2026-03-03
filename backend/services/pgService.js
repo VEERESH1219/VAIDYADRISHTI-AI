@@ -217,10 +217,14 @@ export async function insertPrescriptionLog({
         VALUES ($1, $2, $3, $4)
     `;
 
-    await pool.query(query, [
-        tenantId,
-        userId,
-        rawInput,
-        extractedCount
-    ]);
+    try {
+        await getPool().query(query, [
+            tenantId,
+            userId,
+            rawInput,
+            extractedCount
+        ]);
+    } catch (err) {
+        console.warn('[PostgreSQL] prescription_logs insert skipped:', err.message);
+    }
 }
