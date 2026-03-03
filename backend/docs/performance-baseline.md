@@ -88,5 +88,32 @@ Use override only in controlled performance environments.
 ## 8. Performance Config Section
 Use env vars to tune test environment shape (not business logic):
 - DB pool: `DB_POOL_MAX`, `DB_POOL_IDLE_TIMEOUT_MS`, `DB_POOL_CONN_TIMEOUT_MS`
+- DB safety timeouts: `DB_STATEMENT_TIMEOUT_MS`, `DB_IDLE_TX_TIMEOUT_MS`, `DB_LOCK_TIMEOUT_MS`
 - Worker parallelism: `WORKER_CONCURRENCY`
 - Rate limiter traffic controls: `RATE_LIMIT_PUBLIC_MAX`, `RATE_LIMIT_TENANT_MAX`, `RATE_LIMIT_WINDOW_SECONDS`
+- Redis reconnect/timeout: `REDIS_CONNECT_TIMEOUT_MS`, `REDIS_RETRY_BASE_MS`, `REDIS_RETRY_MAX_MS`
+- API compression threshold: `COMPRESSION_THRESHOLD_BYTES`
+- Rate limiter latency guard: `RATE_LIMIT_TIMEOUT_MS`
+
+## 9. Safe Tuning Notes
+- Worker concurrency is capped against DB pool size to reduce connection starvation.
+- Keep `DB_POOL_MAX` above worker concurrency with headroom for API queries.
+- Statement and lock timeouts protect request latency during DB contention.
+- Compression is enabled with a low threshold to reduce payload transfer time; `/metrics` is excluded.
+- Redis client reuses one shared connection per process and uses bounded reconnect backoff.
+
+## 10. Before vs After Template
+Use this template for each tuning iteration:
+
+| Scenario | Concurrency | p50 (ms) Before | p95 (ms) Before | p50 (ms) After | p95 (ms) After | Error % Before | Error % After | Notes |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `/api/process-prescription` sync | 10 |  |  |  |  |  |  |  |
+| `/api/process-prescription` sync | 50 |  |  |  |  |  |  |  |
+| `/api/process-prescription-async` | 100 |  |  |  |  |  |  |  |
+| `/api/tenant/usage` auth | 200 |  |  |  |  |  |  |  |
+
+Checklist per row:
+- Validate no API schema change.
+- Validate business behavior unchanged.
+- Validate slow query counter trend.
+- Validate queue failure/retry trend.
