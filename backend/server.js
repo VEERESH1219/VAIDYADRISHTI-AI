@@ -10,18 +10,21 @@ import tenantUsageRouter from './routes/tenant/usage.js';
 import { requireAuth } from './middleware/authMiddleware.js';
 import { attachRequestContext } from './middleware/requestContext.js';
 import { redisRateLimiter } from './middleware/rateLimiter.js';
+import { httpMetricsMiddleware } from './middleware/httpMetrics.js';
 
 import { getLLMInfo } from './services/llmService.js';
 import {
     hasPostgres,
-    pingDb,
+    pingDbDetailed,
     getMedicineCount,
     getTenantDailyLimit,
     getTenantTodayUsage,
     closePool,
 } from './services/pgService.js';
-import { pingRedis, closeRedisClient } from './config/redis.js';
-import { closePrescriptionQueue } from './jobs/prescriptionQueue.js';
+import { pingRedisDetailed, closeRedisClient } from './config/redis.js';
+import { closePrescriptionQueue, getPrescriptionQueueState } from './jobs/prescriptionQueue.js';
+import { getMetricsContentType, getMetricsSnapshot } from './observability/metrics.js';
+import { startResourceMonitor } from './observability/resourceMonitor.js';
 import { logger, getLogLevel } from './utils/logger.js';
 
 loadEnv();
@@ -36,6 +39,7 @@ Object.keys(process.env).forEach((key) => {
 const app = express();
 const PORT = Number(process.env.PORT);
 const GLOBAL_REQUEST_TIMEOUT_MS = Number(process.env.GLOBAL_REQUEST_TIMEOUT_MS);
+const stopResourceMonitor = startResourceMonitor({ role: 'api' });
 
 function sanitizeHeaderValue(value) {
     return (value || '').replace(/[^\x20-\x7E]/g, '');
@@ -44,6 +48,7 @@ function sanitizeHeaderValue(value) {
 app.set('trust proxy', true);
 
 app.use(attachRequestContext);
+app.use(httpMetricsMiddleware);
 
 app.use((req, res, next) => {
     const timeoutHandle = setTimeout(() => {
@@ -81,15 +86,25 @@ app.get('/health/live', (req, res) => {
 });
 
 app.get('/health/ready', async (req, res) => {
-    const dbReady = hasPostgres() ? await pingDb().catch(() => false) : false;
-    const redisReady = await pingRedis().catch(() => false);
-    const ready = dbReady && redisReady;
+    const dbProbe = hasPostgres()
+        ? await pingDbDetailed().catch(() => ({ ok: false, latencyMs: null }))
+        : { ok: false, latencyMs: null };
+    const redisProbe = await pingRedisDetailed().catch(() => ({ ok: false, latencyMs: null }));
+    const queueState = getPrescriptionQueueState();
+    const ready = dbProbe.ok && redisProbe.ok;
 
     return res.status(ready ? 200 : 503).json({
         status: ready ? 'ok' : 'degraded',
         check: 'readiness',
-        database: dbReady ? 'connected' : 'disconnected',
-        redis: redisReady ? 'connected' : 'disconnected',
+        database: {
+            status: dbProbe.ok ? 'connected' : 'disconnected',
+            latency_ms: dbProbe.latencyMs == null ? null : Number(dbProbe.latencyMs.toFixed(2)),
+        },
+        redis: {
+            status: redisProbe.ok ? 'connected' : 'disconnected',
+            latency_ms: redisProbe.latencyMs == null ? null : Number(redisProbe.latencyMs.toFixed(2)),
+        },
+        queue: queueState,
         timestamp: new Date().toISOString(),
         requestId: req.requestId,
     });
@@ -97,8 +112,12 @@ app.get('/health/ready', async (req, res) => {
 
 app.get('/health', async (req, res, next) => {
     try {
-        const dbOnline = hasPostgres() ? await pingDb().catch(() => false) : false;
-        const redisOnline = await pingRedis().catch(() => false);
+        const dbProbe = hasPostgres()
+            ? await pingDbDetailed().catch(() => ({ ok: false }))
+            : { ok: false };
+        const dbOnline = dbProbe.ok;
+        const redisProbe = await pingRedisDetailed().catch(() => ({ ok: false }));
+        const redisOnline = redisProbe.ok;
         const medicineCount = dbOnline ? await getMedicineCount().catch(() => 0) : 0;
 
         return res.json({
@@ -118,6 +137,16 @@ app.get('/health', async (req, res, next) => {
         });
     } catch (err) {
         next(err);
+    }
+});
+
+app.get('/metrics', async (req, res, next) => {
+    try {
+        const metrics = await getMetricsSnapshot();
+        res.setHeader('Content-Type', getMetricsContentType());
+        return res.status(200).send(metrics);
+    } catch (err) {
+        return next(err);
     }
 });
 
@@ -170,7 +199,7 @@ app.use((err, req, res, next) => {
     logger.error({
         requestId: req.requestId,
         method: req.method,
-        path: req.originalUrl || req.url,
+        path: req.path || req.originalUrl || req.url,
         statusCode,
         message: err?.message,
         stack: statusCode >= 500 ? err?.stack : undefined,
@@ -218,6 +247,7 @@ async function shutdown(signal, error = null) {
         closeRedisClient(),
         closePool(),
     ]);
+    stopResourceMonitor();
 
     if (error) {
         logger.fatal({ err: error }, 'server_shutdown_due_to_fatal_error');
