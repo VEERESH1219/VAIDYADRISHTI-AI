@@ -12,8 +12,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends dumb-init && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY --chown=node:node --from=deps /app/node_modules ./node_modules
+COPY --chown=node:node . .
 
 USER node
 EXPOSE 3001
