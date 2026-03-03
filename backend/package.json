@@ -18,7 +18,10 @@
     "ollama:pull": "node scripts/pull-models.js",
     "paddle:install": "pip install \"paddleocr<3.0\" paddlepaddle",
     "db:setup": "node scripts/setupDb.js",
-    "db:import": "node scripts/importToPostgres.js"
+    "db:import": "node scripts/importToPostgres.js",
+    "load:sync": "node scripts/load/runAutocannon.js sync",
+    "load:async": "node scripts/load/runAutocannon.js async",
+    "load:auth": "node scripts/load/runAutocannon.js auth"
   },
   "keywords": [
     "medicine",
