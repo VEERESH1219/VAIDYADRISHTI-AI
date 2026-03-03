@@ -6,6 +6,9 @@ import { recordRedisLatency } from '../observability/metrics.js';
 loadEnv();
 
 const redisUrl = process.env.REDIS_URL;
+const REDIS_CONNECT_TIMEOUT_MS = Number(process.env.REDIS_CONNECT_TIMEOUT_MS || 5_000);
+const REDIS_RETRY_BASE_MS = Number(process.env.REDIS_RETRY_BASE_MS || 200);
+const REDIS_RETRY_MAX_MS = Number(process.env.REDIS_RETRY_MAX_MS || 2_000);
 
 let redisClient;
 let lastErrorLogAt = 0;
@@ -15,8 +18,14 @@ export function getRedisClient() {
         redisClient = new IORedis(redisUrl, {
             maxRetriesPerRequest: null,
             enableReadyCheck: true,
+            enableAutoPipelining: true,
+            enableOfflineQueue: false,
+            connectTimeout: REDIS_CONNECT_TIMEOUT_MS,
+            keepAlive: 10_000,
+            connectionName: process.env.SERVICE_NAME || 'vaidyadrishti-backend',
             retryStrategy(times) {
-                return Math.min(times * 200, 2000);
+                const jitterMs = Math.floor(Math.random() * 100);
+                return Math.min((times * REDIS_RETRY_BASE_MS) + jitterMs, REDIS_RETRY_MAX_MS);
             },
         });
 
