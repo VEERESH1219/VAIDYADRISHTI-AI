@@ -13,6 +13,7 @@
 import pg     from 'pg';
 import { loadEnv } from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { recordDbQuery } from '../observability/metrics.js';
 
 loadEnv();
 
@@ -20,6 +21,51 @@ const { Pool } = pg;
 
 // ── Connection pool (lazy) ────────────────────────────────────────────────────
 let _pool = null;
+const SLOW_QUERY_THRESHOLD_MS = Number(process.env.DB_SLOW_QUERY_MS || 500);
+
+function inferQueryOperation(queryText) {
+    if (typeof queryText !== 'string') return 'unknown';
+    const firstToken = queryText.trim().split(/\s+/)[0]?.toUpperCase();
+    return firstToken || 'unknown';
+}
+
+function wrapPoolQuery(pool) {
+    if (pool.__metricsWrapped) return;
+
+    const baseQuery = pool.query.bind(pool);
+    pool.query = async (...args) => {
+        const queryText = typeof args[0] === 'string' ? args[0] : args[0]?.text;
+        const operation = inferQueryOperation(queryText);
+        const startedAt = process.hrtime.bigint();
+        let success = false;
+
+        try {
+            const result = await baseQuery(...args);
+            success = true;
+            return result;
+        } finally {
+            const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+            const isSlow = durationMs >= SLOW_QUERY_THRESHOLD_MS;
+
+            recordDbQuery({
+                operation,
+                durationMs,
+                success,
+                isSlow,
+            });
+
+            if (isSlow) {
+                logger.warn({
+                    operation,
+                    durationMs: Number(durationMs.toFixed(2)),
+                    thresholdMs: SLOW_QUERY_THRESHOLD_MS,
+                }, 'db_slow_query_detected');
+            }
+        }
+    };
+
+    pool.__metricsWrapped = true;
+}
 
 function connectionString() {
     return (
@@ -40,6 +86,7 @@ export function getPool() {
             idleTimeoutMillis: 30_000,
             connectionTimeoutMillis: 5_000,
         });
+        wrapPoolQuery(_pool);
         _pool.on('error', (err) => {
             logger.error({ err: err.message }, '[PostgreSQL] Pool error');
         });
@@ -63,13 +110,21 @@ export function hasPostgres() {
 
 /** Quick connectivity check — returns true if DB is reachable */
 export async function pingDb() {
+    const details = await pingDbDetailed();
+    return details.ok;
+}
+
+export async function pingDbDetailed() {
+    const startedAt = process.hrtime.bigint();
     try {
         const client = await getPool().connect();
         await client.query('SELECT 1');
         client.release();
-        return true;
-    } catch {
-        return false;
+        const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        return { ok: true, latencyMs };
+    } catch (err) {
+        const latencyMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        return { ok: false, latencyMs, error: err?.message };
     }
 }
 
