@@ -1,6 +1,10 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 
 const register = new Registry();
+const METRICS_SNAPSHOT_CACHE_MS = Number(process.env.METRICS_SNAPSHOT_CACHE_MS || 1000);
+let metricsCacheValue = '';
+let metricsCacheUntil = 0;
+let metricsInFlight = null;
 collectDefaultMetrics({
     register,
     prefix: 'vaidyadrishti_',
@@ -202,5 +206,22 @@ export function getMetricsContentType() {
 }
 
 export async function getMetricsSnapshot() {
-    return register.metrics();
+    const now = Date.now();
+    if (metricsCacheValue && now < metricsCacheUntil) {
+        return metricsCacheValue;
+    }
+
+    if (!metricsInFlight) {
+        metricsInFlight = register.metrics()
+            .then((snapshot) => {
+                metricsCacheValue = snapshot;
+                metricsCacheUntil = Date.now() + METRICS_SNAPSHOT_CACHE_MS;
+                return snapshot;
+            })
+            .finally(() => {
+                metricsInFlight = null;
+            });
+    }
+
+    return metricsInFlight;
 }
