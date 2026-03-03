@@ -28,11 +28,13 @@ import {
 import { pingRedisDetailed, closeRedisClient } from './config/redis.js';
 import { closePrescriptionQueue, getPrescriptionQueueState } from './jobs/prescriptionQueue.js';
 import { getMetricsContentType, getMetricsSnapshot } from './observability/metrics.js';
+import { captureError, flushErrorTracker, initErrorTracker } from './observability/errorTracker.js';
 import { startResourceMonitor } from './observability/resourceMonitor.js';
 import { logger, getLogLevel } from './utils/logger.js';
 
 loadEnv();
 validateEnvOrThrow({ role: 'api' });
+await initErrorTracker({ service: 'api' });
 
 Object.keys(process.env).forEach((key) => {
     if (typeof process.env[key] === 'string') {
@@ -189,6 +191,7 @@ app.get('/metrics', async (req, res, next) => {
     try {
         const metrics = await getMetricsSnapshot();
         res.setHeader('Content-Type', getMetricsContentType());
+        res.setHeader('Cache-Control', 'no-store, max-age=0');
         return res.status(200).send(metrics);
     } catch (err) {
         return next(err);
@@ -249,6 +252,14 @@ app.use((err, req, res, next) => {
         message: err?.message,
         stack: statusCode >= 500 ? err?.stack : undefined,
     }, 'server_error');
+    if (statusCode >= 500) {
+        captureError(err, {
+            requestId: req.requestId,
+            method: req.method,
+            path: req.path || req.originalUrl || req.url,
+            statusCode,
+        });
+    }
 
     const safeMessage = statusCode >= 500
         ? 'Internal server error.'
@@ -291,6 +302,7 @@ async function shutdown(signal, error = null) {
         closePrescriptionQueue(),
         closeRedisClient(),
         closePool(),
+        flushErrorTracker(),
     ]);
     stopResourceMonitor();
 
