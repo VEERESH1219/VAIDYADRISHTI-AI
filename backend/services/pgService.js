@@ -23,8 +23,12 @@ const { Pool } = pg;
 let _pool = null;
 const SLOW_QUERY_THRESHOLD_MS = Number(process.env.DB_SLOW_QUERY_MS || 500);
 const DB_POOL_MAX = Number(process.env.DB_POOL_MAX || 10);
+const DB_POOL_MIN = Number(process.env.DB_POOL_MIN || 2);
 const DB_POOL_IDLE_TIMEOUT_MS = Number(process.env.DB_POOL_IDLE_TIMEOUT_MS || 30_000);
 const DB_POOL_CONN_TIMEOUT_MS = Number(process.env.DB_POOL_CONN_TIMEOUT_MS || 5_000);
+const DB_STATEMENT_TIMEOUT_MS = Number(process.env.DB_STATEMENT_TIMEOUT_MS || 8_000);
+const DB_IDLE_TX_TIMEOUT_MS = Number(process.env.DB_IDLE_TX_TIMEOUT_MS || 10_000);
+const DB_LOCK_TIMEOUT_MS = Number(process.env.DB_LOCK_TIMEOUT_MS || 3_000);
 
 function inferQueryOperation(queryText) {
     if (typeof queryText !== 'string') return 'unknown';
@@ -86,8 +90,13 @@ export function getPool() {
         _pool = new Pool({
             connectionString: connectionString(),
             max: DB_POOL_MAX,
+            min: DB_POOL_MIN,
             idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
             connectionTimeoutMillis: DB_POOL_CONN_TIMEOUT_MS,
+            statement_timeout: DB_STATEMENT_TIMEOUT_MS,
+            idle_in_transaction_session_timeout: DB_IDLE_TX_TIMEOUT_MS,
+            lock_timeout: DB_LOCK_TIMEOUT_MS,
+            application_name: process.env.SERVICE_NAME || 'vaidyadrishti-backend',
         });
         wrapPoolQuery(_pool);
         _pool.on('error', (err) => {
