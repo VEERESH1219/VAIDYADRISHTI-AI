@@ -13,6 +13,7 @@
 import fs   from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { logger } from '../utils/logger.js';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const CACHE_DIR  = path.join(__dirname, '..', 'data');
@@ -36,7 +37,7 @@ function persistToDisk() {
     try {
         fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
     } catch (err) {
-        console.error('[LocalCache] ❌ Failed to save cache to disk:', err.message);
+        logger.error({ err: err.message }, '[LocalCache] Failed to save cache to disk');
     }
 }
 
@@ -47,16 +48,16 @@ function init() {
 
         if (!fs.existsSync(CACHE_FILE)) {
             fs.writeFileSync(CACHE_FILE, '[]', 'utf8');
-            console.log('[LocalCache] 📁 New cache file created at backend/data/medicines_cache.json');
+            logger.info('[LocalCache] New cache file created at backend/data/medicines_cache.json');
             return;
         }
 
         const raw = fs.readFileSync(CACHE_FILE, 'utf8');
         cache = JSON.parse(raw);
         rebuildMap();
-        console.log(`[LocalCache] 📦 Loaded ${cache.length} medicine(s) from local cache.`);
+        logger.info({ count: cache.length }, '[LocalCache] Loaded medicines from local cache');
     } catch (err) {
-        console.error('[LocalCache] ❌ Failed to load cache:', err.message);
+        logger.error({ err: err.message }, '[LocalCache] Failed to load cache');
         cache = [];
     }
 }
@@ -97,7 +98,7 @@ export function saveToCache(medicine) {
 
     // Skip if already cached
     if (cacheMap.has(key)) {
-        console.log(`[LocalCache] ℹ️  "${medicine.brand_name}" already in cache — skipping.`);
+        logger.debug({ brandName: medicine.brand_name }, '[LocalCache] Already in cache, skipping');
         return false;
     }
 
@@ -120,7 +121,7 @@ export function saveToCache(medicine) {
     cacheMap.get(key).push(entry);
 
     persistToDisk();
-    console.log(`[LocalCache] ✅ Saved "${medicine.brand_name}" → backend/data/medicines_cache.json  (total: ${cache.length})`);
+    logger.info({ brandName: medicine.brand_name, total: cache.length }, '[LocalCache] Saved medicine to cache');
     return true;
 }
 
