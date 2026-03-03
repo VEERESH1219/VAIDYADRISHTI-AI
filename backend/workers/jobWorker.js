@@ -18,9 +18,11 @@ import {
     markProcessingJobFailed,
     markProcessingJobInProgress,
 } from '../services/pgService.js';
+import { captureError, flushErrorTracker, initErrorTracker } from '../observability/errorTracker.js';
 
 loadEnv();
 validateEnvOrThrow({ role: 'worker' });
+await initErrorTracker({ service: 'worker' });
 
 const configuredConcurrency = Number(process.env.WORKER_CONCURRENCY);
 const dbPoolMax = Number(process.env.DB_POOL_MAX || 10);
@@ -91,6 +93,7 @@ worker.on('completed', (job, result) => {
 
 worker.on('error', (err) => {
     logger.error({ err: err.message }, 'worker_error');
+    captureError(err, { area: 'worker_error_event' });
 });
 
 worker.on('failed', async (job, err) => {
@@ -113,6 +116,7 @@ worker.on('failed', async (job, err) => {
         },
         'worker_job_failed'
     );
+    captureError(err, { area: 'worker_job_failed', jobId, tenantId });
 });
 
 logger.info({ concurrency }, 'job_worker_started');
@@ -129,6 +133,7 @@ async function shutdown(signal, error = null) {
         worker.close(),
         closeRedisClient(),
         closePool(),
+        flushErrorTracker(),
     ]);
     stopResourceMonitor();
 
