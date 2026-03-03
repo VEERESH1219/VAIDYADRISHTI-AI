@@ -10,6 +10,30 @@ export const logger = pino({
         service: process.env.SERVICE_NAME || 'vaidyadrishti-backend',
         env: process.env.NODE_ENV || 'development',
     },
+    redact: {
+        paths: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.headers.x-master-key',
+            'headers.authorization',
+            'headers.cookie',
+            'headers.x-master-key',
+            '*.authorization',
+            '*.token',
+            '*.apiKey',
+            '*.api_key',
+            '*.password',
+            '*.secret',
+            '*.masterKey',
+            '*.master_key',
+            '*.jwt',
+            '*.refreshToken',
+            '*.refresh_token',
+            'err.config.headers.Authorization',
+            'err.config.headers.authorization',
+        ],
+        censor: '[REDACTED]',
+    },
 });
 
 export function getLogLevel() {
