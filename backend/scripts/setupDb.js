@@ -66,6 +66,32 @@ async function main() {
         `);
         console.log('✅  medicines table ready');
 
+        // 2c. processing jobs table for async OCR/NLP pipelines
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS processing_jobs (
+                id            UUID PRIMARY KEY,
+                tenant_id     TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'queued',
+                input_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                output_payload JSONB,
+                error_message TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                started_at    TIMESTAMPTZ,
+                completed_at  TIMESTAMPTZ,
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        `);
+        await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_processing_jobs_tenant_created
+            ON processing_jobs (tenant_id, created_at DESC)
+        `);
+        await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_processing_jobs_status
+            ON processing_jobs (status)
+        `);
+        console.log('✅  processing_jobs table ready');
+
         // 2b. Add embedding column for vector search (pgvector, optional)
         try {
             await client.query(`
