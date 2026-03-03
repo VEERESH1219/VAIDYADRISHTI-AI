@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
+import helmet from 'helmet';
 import { loadEnv } from './config/env.js';
 import { validateEnvOrThrow } from './config/validateEnv.js';
 
@@ -10,8 +11,10 @@ import adminResetTenantUsageRouter from './routes/admin/resetTenantUsage.js';
 import tenantUsageRouter from './routes/tenant/usage.js';
 import { requireAuth } from './middleware/authMiddleware.js';
 import { attachRequestContext } from './middleware/requestContext.js';
-import { redisRateLimiter } from './middleware/rateLimiter.js';
+import { authRateLimiter, redisRateLimiter } from './middleware/rateLimiter.js';
 import { httpMetricsMiddleware } from './middleware/httpMetrics.js';
+import { blockPrototypePollution } from './middleware/validation.js';
+import { enforceTenantIsolation } from './middleware/tenantIsolation.js';
 
 import { getLLMInfo } from './services/llmService.js';
 import {
@@ -41,6 +44,8 @@ const app = express();
 const PORT = Number(process.env.PORT);
 const GLOBAL_REQUEST_TIMEOUT_MS = Number(process.env.GLOBAL_REQUEST_TIMEOUT_MS);
 const COMPRESSION_THRESHOLD_BYTES = Number(process.env.COMPRESSION_THRESHOLD_BYTES || 1024);
+const REQUEST_BODY_LIMIT_BYTES = Number(process.env.REQUEST_BODY_LIMIT_BYTES || 25 * 1024 * 1024);
+const URLENCODED_BODY_LIMIT_BYTES = Number(process.env.URLENCODED_BODY_LIMIT_BYTES || 25 * 1024 * 1024);
 const stopResourceMonitor = startResourceMonitor({ role: 'api' });
 
 function sanitizeHeaderValue(value) {
@@ -48,9 +53,26 @@ function sanitizeHeaderValue(value) {
 }
 
 app.set('trust proxy', true);
+app.disable('x-powered-by');
 
 app.use(attachRequestContext);
 app.use(httpMetricsMiddleware);
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'none'"],
+            baseUri: ["'none'"],
+            frameAncestors: ["'none'"],
+            formAction: ["'none'"],
+            imgSrc: ["'self'", 'data:'],
+            styleSrc: ["'self'"],
+            scriptSrc: ["'self'"],
+            connectSrc: ["'self'"],
+        },
+    },
+    crossOriginEmbedderPolicy: false,
+    referrerPolicy: { policy: 'no-referrer' },
+}));
 
 app.use((req, res, next) => {
     const timeoutHandle = setTimeout(() => {
@@ -87,8 +109,17 @@ app.use(compression({
     },
 }));
 
-app.use(express.json({ limit: '25mb' }));
-app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+app.use(express.json({
+    strict: true,
+    limit: `${REQUEST_BODY_LIMIT_BYTES}b`,
+    type: ['application/json', 'application/*+json'],
+}));
+app.use(express.urlencoded({
+    extended: false,
+    limit: `${URLENCODED_BODY_LIMIT_BYTES}b`,
+    parameterLimit: 50,
+}));
+app.use(blockPrototypePollution);
 
 app.get('/health/live', (req, res) => {
     return res.json({
@@ -164,10 +195,10 @@ app.get('/metrics', async (req, res, next) => {
     }
 });
 
-app.use('/admin', redisRateLimiter, adminTenantRouter);
-app.use('/admin', redisRateLimiter, adminResetTenantUsageRouter);
+app.use('/admin', authRateLimiter, redisRateLimiter, adminTenantRouter);
+app.use('/admin', authRateLimiter, redisRateLimiter, adminResetTenantUsageRouter);
 
-app.use('/api', requireAuth, redisRateLimiter, async (req, res, next) => {
+app.use('/api', requireAuth, enforceTenantIsolation, redisRateLimiter, async (req, res, next) => {
     const tenantId = req.tenantId;
     if (!tenantId || !hasPostgres()) return next();
 
