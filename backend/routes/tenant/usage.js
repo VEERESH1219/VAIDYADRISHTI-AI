@@ -1,9 +1,17 @@
 import { Router } from 'express';
 import { getPool, hasPostgres } from '../../services/pgService.js';
+import { validateRequest } from '../../middleware/validation.js';
 
 const router = Router();
 
-router.get('/tenant/usage', async (req, res, next) => {
+const validateUsageRequest = validateRequest((req) => {
+    if (req.body && Object.keys(req.body).length > 0) {
+        return 'GET requests do not accept a request body.';
+    }
+    return null;
+});
+
+router.get('/tenant/usage', validateUsageRequest, async (req, res, next) => {
     try {
         const tenantId = req.tenantId;
 
@@ -57,7 +65,7 @@ router.get('/tenant/usage', async (req, res, next) => {
     }
 });
 
-router.get('/tenant/usage/daily', async (req, res, next) => {
+router.get('/tenant/usage/daily', validateUsageRequest, async (req, res, next) => {
     try {
         const tenantId = req.tenantId;
 
