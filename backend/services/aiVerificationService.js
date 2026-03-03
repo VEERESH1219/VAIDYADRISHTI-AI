@@ -9,9 +9,10 @@
  */
 
 import { chatJSON, chatText, PROVIDER } from './llmService.js';
-import dotenv from 'dotenv';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
-dotenv.config();
+loadEnv();
 
 /**
  * Helper: Universal fetch with timeout to prevent hangs.
@@ -37,7 +38,7 @@ async function lookupAI(brandName, variant, form) {
     // Do NOT include form in the query — let AI determine the correct form from knowledge.
     // Passing the NLP-guessed form would bias the result (e.g. "Amoxicillin 625 Capsule" → AI echoes Capsule)
     const query = [brandName, variant].filter(Boolean).join(' ');
-    console.log(`[Stage4-AI/${PROVIDER}] Verifying: "${query}"...`);
+    logger.info({ provider: PROVIDER }, `[Stage4-AI] Verifying "${query}"`);
 
     const systemPrompt = `You are a professional medical knowledge engine.
 Verify if this medicine exists in the real-world market (focusing on India/Global).
@@ -59,7 +60,7 @@ SCHEMA:
     try {
         const parsed = await chatJSON(systemPrompt, `Verify: "${query}"`, 0);
         if (parsed.exists && parsed.confidence >= 90) {
-            console.log(`[Stage4-AI/${PROVIDER}] ✓ Match found: "${parsed.official_brand}"`);
+            logger.info({ provider: PROVIDER, brand: parsed.official_brand }, '[Stage4-AI] Match found');
             return {
                 id: `ai_v_${Date.now()}`,
                 brand_name: parsed.official_brand,
@@ -72,7 +73,7 @@ SCHEMA:
             };
         }
     } catch (err) {
-        console.error(`[Stage4-AI/${PROVIDER}] Error:`, err.message);
+        logger.error({ provider: PROVIDER, err: err.message }, '[Stage4-AI] Error');
     }
     return null;
 }
@@ -84,12 +85,12 @@ async function lookupOpenFDA(brandName, variant) {
     const query = variant ? `"${brandName}" AND "${variant}"` : `"${brandName}"`;
     const url = `https://api.fda.gov/drug/label.json?search=openfda.brand_name:${encodeURIComponent(query)}&limit=1`;
 
-    console.log(`[Stage4-OpenFDA] Searching web source...`);
+    logger.info('[Stage4-OpenFDA] Searching web source');
     const data = await fetchWithTimeout(url);
 
     if (data?.results?.[0]?.openfda) {
         const fda = data.results[0].openfda;
-        console.log(`[Stage4-OpenFDA] ✓ Match found in web sources.`);
+        logger.info('[Stage4-OpenFDA] Match found in web sources');
         return {
             id: `fda_${Date.now()}`,
             brand_name: fda.brand_name?.[0] || brandName,
@@ -110,7 +111,7 @@ async function lookupOpenFDA(brandName, variant) {
 async function lookupRxNorm(brandName) {
     const url = `https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(brandName)}`;
 
-    console.log(`[Stage4-RxNorm] Searching web source...`);
+    logger.info('[Stage4-RxNorm] Searching web source');
     const data = await fetchWithTimeout(url);
 
     const groups = data?.drugGroup?.conceptGroup;
@@ -119,7 +120,7 @@ async function lookupRxNorm(brandName) {
         const concept = brandGroup?.conceptProperties?.[0];
 
         if (concept) {
-            console.log(`[Stage4-RxNorm] ✓ Match found in web sources.`);
+            logger.info('[Stage4-RxNorm] Match found in web sources');
             return {
                 id: `rx_${concept.rxcui}`,
                 brand_name: concept.name,
@@ -140,30 +141,30 @@ async function lookupRxNorm(brandName) {
  * Prioritizes official Web Sources (OpenFDA/RxNorm) as requested.
  */
 export async function verifyMedicineRealWorld(brandName, variant = '', form = '') {
-    console.log(`\n[Stage4] Fallback engaged for: "${brandName}"`);
+    logger.info({ brandName }, '[Stage4] Fallback engaged');
 
     // 1. OpenFDA (Primary Web Fallback)
     const fdaResult = await lookupOpenFDA(brandName, variant);
     if (fdaResult) {
-        console.log('[Stage4] ✅ Found in Web Source: OpenFDA.');
+        logger.info('[Stage4] Found in Web Source: OpenFDA');
         return fdaResult;
     }
 
     // 2. RxNorm (Secondary Web Fallback)
     const rxResult = await lookupRxNorm(brandName);
     if (rxResult) {
-        console.log('[Stage4] ✅ Found in Web Source: RxNorm.');
+        logger.info('[Stage4] Found in Web Source: RxNorm');
         return rxResult;
     }
 
     // 3. AI Knowledge Base (Intelligent Cleanup & Knowledge Fallback)
     const aiResult = await lookupAI(brandName, variant, form);
     if (aiResult) {
-        console.log('[Stage4] ✅ Found in AI Knowledge Base.');
+        logger.info('[Stage4] Found in AI Knowledge Base');
         return aiResult;
     }
 
-    console.log(`[Stage4] ✗ No matches found in any web source.`);
+    logger.info('[Stage4] No matches found in any web source');
     return null;
 }
 /**
@@ -173,14 +174,14 @@ export async function getMedicineDescription(brandName, genericName) {
     if (!brandName && !genericName) return null;
 
     const query = [brandName, genericName].filter(Boolean).join(' / ');
-    console.log(`[Description] Generating usage for: "${query}"...`);
+    logger.info({ query }, '[Description] Generating usage');
 
     const systemPrompt = `You are a professional pharmacist. Give ONE sentence (max 20 words) describing what the medicine treats. Focus on the GENERIC NAME only, not brand names. No lists, no brand comparisons, no disclaimers.`;
 
     try {
         return await chatText(systemPrompt, `Describe usage for: ${query}`, 0.5);
     } catch (err) {
-        console.error(`[Description] ${PROVIDER} Error:`, err.message);
+        logger.error({ provider: PROVIDER, err: err.message }, '[Description] Provider error');
         return null;
     }
 }
