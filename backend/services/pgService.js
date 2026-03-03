@@ -22,6 +22,9 @@ const { Pool } = pg;
 // ── Connection pool (lazy) ────────────────────────────────────────────────────
 let _pool = null;
 const SLOW_QUERY_THRESHOLD_MS = Number(process.env.DB_SLOW_QUERY_MS || 500);
+const DB_POOL_MAX = Number(process.env.DB_POOL_MAX || 10);
+const DB_POOL_IDLE_TIMEOUT_MS = Number(process.env.DB_POOL_IDLE_TIMEOUT_MS || 30_000);
+const DB_POOL_CONN_TIMEOUT_MS = Number(process.env.DB_POOL_CONN_TIMEOUT_MS || 5_000);
 
 function inferQueryOperation(queryText) {
     if (typeof queryText !== 'string') return 'unknown';
@@ -82,9 +85,9 @@ export function getPool() {
     if (!_pool) {
         _pool = new Pool({
             connectionString: connectionString(),
-            max: 10,
-            idleTimeoutMillis: 30_000,
-            connectionTimeoutMillis: 5_000,
+            max: DB_POOL_MAX,
+            idleTimeoutMillis: DB_POOL_IDLE_TIMEOUT_MS,
+            connectionTimeoutMillis: DB_POOL_CONN_TIMEOUT_MS,
         });
         wrapPoolQuery(_pool);
         _pool.on('error', (err) => {
