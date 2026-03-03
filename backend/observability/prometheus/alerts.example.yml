@@ -1,0 +1,36 @@
+groups:
+  - name: vaidyadrishti-api-alerts
+    interval: 30s
+    rules:
+      - alert: VaidyaHigh5xxRate
+        expr: |
+          (
+            sum(rate(vaidyadrishti_http_errors_total{class="5xx"}[5m]))
+            /
+            clamp_min(sum(rate(vaidyadrishti_http_requests_total[5m])), 0.001)
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High 5xx rate on API"
+          description: "5xx rate exceeded 2% over the last 10 minutes."
+
+      - alert: VaidyaRedisLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(vaidyadrishti_redis_latency_seconds_bucket[5m])) by (le)) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Redis latency"
+          description: "Redis p95 latency exceeded 200ms."
+
+      - alert: VaidyaDbSlowQueriesSpike
+        expr: sum(rate(vaidyadrishti_db_slow_queries_total[5m])) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DB slow query spike"
+          description: "Slow query rate exceeded threshold."
+
