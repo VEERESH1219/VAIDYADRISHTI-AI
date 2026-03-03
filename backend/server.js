@@ -1,22 +1,31 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { randomUUID } from 'crypto';
+import { loadEnv } from './config/env.js';
+import { validateEnvOrThrow } from './config/validateEnv.js';
 
 import prescriptionRouter from './routes/prescription.js';
 import adminTenantRouter from './routes/admin/tenant.js';
 import adminResetTenantUsageRouter from './routes/admin/resetTenantUsage.js';
 import tenantUsageRouter from './routes/tenant/usage.js';
 import { requireAuth } from './middleware/authMiddleware.js';
+import { attachRequestContext } from './middleware/requestContext.js';
+import { redisRateLimiter } from './middleware/rateLimiter.js';
 
 import { getLLMInfo } from './services/llmService.js';
-import { hasPostgres, pingDb, getMedicineCount, getTenantDailyLimit, getTenantTodayUsage } from './services/pgService.js';
+import {
+    hasPostgres,
+    pingDb,
+    getMedicineCount,
+    getTenantDailyLimit,
+    getTenantTodayUsage,
+    closePool,
+} from './services/pgService.js';
+import { pingRedis, closeRedisClient } from './config/redis.js';
+import { closePrescriptionQueue } from './jobs/prescriptionQueue.js';
 import { logger, getLogLevel } from './utils/logger.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: join(__dirname, '.env') });
+loadEnv();
+validateEnvOrThrow({ role: 'api' });
 
 Object.keys(process.env).forEach((key) => {
     if (typeof process.env[key] === 'string') {
@@ -25,49 +34,17 @@ Object.keys(process.env).forEach((key) => {
 });
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-const GLOBAL_REQUEST_TIMEOUT_MS = 45_000;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 120);
-const rateLimitStore = new Map();
+const PORT = Number(process.env.PORT);
+const GLOBAL_REQUEST_TIMEOUT_MS = Number(process.env.GLOBAL_REQUEST_TIMEOUT_MS);
 
 function sanitizeHeaderValue(value) {
     return (value || '').replace(/[^\x20-\x7E]/g, '');
 }
 
-function getClientIp(req) {
-    const xForwardedFor = req.headers['x-forwarded-for'];
-    if (typeof xForwardedFor === 'string' && xForwardedFor.length > 0) {
-        return xForwardedFor.split(',')[0].trim();
-    }
-    return req.ip || req.socket?.remoteAddress || 'unknown';
-}
+app.set('trust proxy', true);
 
-// ─────────────────────────────────────────────
-// Request ID + Structured Logging
-// ─────────────────────────────────────────────
-app.use((req, res, next) => {
-    req.requestId = randomUUID();
-    res.setHeader('X-Request-Id', req.requestId);
+app.use(attachRequestContext);
 
-    const startedAt = Date.now();
-    res.on('finish', () => {
-        logger.info(JSON.stringify({
-            requestId: req.requestId,
-            method: req.method,
-            path: req.originalUrl || req.url,
-            status: res.statusCode,
-            durationMs: Date.now() - startedAt,
-        }));
-    });
-
-    next();
-});
-
-// ─────────────────────────────────────────────
-// Global Timeout (45s)
-// ─────────────────────────────────────────────
 app.use((req, res, next) => {
     const timeoutHandle = setTimeout(() => {
         if (res.headersSent || res.writableEnded) return;
@@ -83,36 +60,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// ─────────────────────────────────────────────
-// In-Memory Rate Limiter
-// ─────────────────────────────────────────────
-app.use((req, res, next) => {
-    if (req.path === '/health') return next();
-
-    const now = Date.now();
-    const tenantId = req.tenantId || req.user?.tenantId || null;
-    const key = tenantId ? `tenant:${tenantId}` : `ip:${getClientIp(req)}`;
-    const windowStart = now - RATE_LIMIT_WINDOW_MS;
-
-    const history = rateLimitStore.get(key) || [];
-    const recent = history.filter(ts => ts > windowStart);
-
-    if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
-        return res.status(429).json({
-            success: false,
-            requestId: req.requestId,
-            message: 'Too many requests. Please try again later.',
-        });
-    }
-
-    recent.push(now);
-    rateLimitStore.set(key, recent);
-    next();
-});
-
-// ─────────────────────────────────────────────
-// CORS + Body Parsing
-// ─────────────────────────────────────────────
 app.use(cors({
     origin: (origin, callback) => callback(null, true),
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -124,23 +71,48 @@ app.use(cors({
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// ─────────────────────────────────────────────
-// Public Health Route
-// ─────────────────────────────────────────────
+app.get('/health/live', (req, res) => {
+    return res.json({
+        status: 'ok',
+        check: 'liveness',
+        timestamp: new Date().toISOString(),
+        requestId: req.requestId,
+    });
+});
+
+app.get('/health/ready', async (req, res) => {
+    const dbReady = hasPostgres() ? await pingDb().catch(() => false) : false;
+    const redisReady = await pingRedis().catch(() => false);
+    const ready = dbReady && redisReady;
+
+    return res.status(ready ? 200 : 503).json({
+        status: ready ? 'ok' : 'degraded',
+        check: 'readiness',
+        database: dbReady ? 'connected' : 'disconnected',
+        redis: redisReady ? 'connected' : 'disconnected',
+        timestamp: new Date().toISOString(),
+        requestId: req.requestId,
+    });
+});
+
 app.get('/health', async (req, res, next) => {
     try {
         const dbOnline = hasPostgres() ? await pingDb().catch(() => false) : false;
+        const redisOnline = await pingRedis().catch(() => false);
         const medicineCount = dbOnline ? await getMedicineCount().catch(() => 0) : 0;
 
         return res.json({
             status: 'ok',
             timestamp: new Date().toISOString(),
-            version: '1.0.4',
+            version: process.env.APP_VERSION || '1.1.0',
             llm: getLLMInfo(),
             database: {
-                type: 'PostgreSQL 16 (local)',
+                type: 'PostgreSQL 16',
                 status: dbOnline ? 'connected' : 'disconnected',
                 medicines: medicineCount.toLocaleString(),
+            },
+            redis: {
+                status: redisOnline ? 'connected' : 'disconnected',
             },
             requestId: req.requestId,
         });
@@ -149,16 +121,10 @@ app.get('/health', async (req, res, next) => {
     }
 });
 
-// ─────────────────────────────────────────────
-// Admin Tenant Route (Master Key Protected)
-// ─────────────────────────────────────────────
-app.use('/admin', adminTenantRouter);
-app.use('/admin', adminResetTenantUsageRouter);
+app.use('/admin', redisRateLimiter, adminTenantRouter);
+app.use('/admin', redisRateLimiter, adminResetTenantUsageRouter);
 
-// ─────────────────────────────────────────────
-// Protected API Routes (JWT Required)
-// ─────────────────────────────────────────────
-app.use('/api', requireAuth, async (req, res, next) => {
+app.use('/api', requireAuth, redisRateLimiter, async (req, res, next) => {
     const tenantId = req.tenantId;
     if (!tenantId || !hasPostgres()) return next();
 
@@ -182,12 +148,9 @@ app.use('/api', requireAuth, async (req, res, next) => {
     }
 });
 
-app.use('/api', requireAuth, prescriptionRouter);
-app.use('/api', requireAuth, tenantUsageRouter);
+app.use('/api', prescriptionRouter);
+app.use('/api', tenantUsageRouter);
 
-// ─────────────────────────────────────────────
-// 404 Handler
-// ─────────────────────────────────────────────
 app.use((req, res) => {
     const origin = sanitizeHeaderValue(req.headers.origin);
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -200,22 +163,19 @@ app.use((req, res) => {
     });
 });
 
-// ─────────────────────────────────────────────
-// Central Error Handler
-// ─────────────────────────────────────────────
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
+    const statusCode = Number(err?.statusCode || err?.status || 500);
 
-    logger.error('[server.error]', {
+    logger.error({
         requestId: req.requestId,
         method: req.method,
         path: req.originalUrl || req.url,
-        statusCode: err?.statusCode || err?.status || 500,
+        statusCode,
         message: err?.message,
-        stack: err?.stack,
-    });
+        stack: statusCode >= 500 ? err?.stack : undefined,
+    }, 'server_error');
 
-    const statusCode = Number(err?.statusCode || err?.status || 500);
     const safeMessage = statusCode >= 500
         ? 'Internal server error.'
         : (err?.message || 'Request failed.');
@@ -231,15 +191,47 @@ app.use((err, req, res, next) => {
     });
 });
 
-process.on('uncaughtException', (err) => {
-    logger.error('[Server] Uncaught exception:', err);
-});
-
-process.on('unhandledRejection', (reason) => {
-    logger.error('[Server] Unhandled rejection:', reason);
-});
-
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     const llm = getLLMInfo();
-    logger.info(`[Server] Port ${PORT} | Chat ${llm.chat_provider}/${llm.chat_model} | Vision ${llm.vision_provider}/${llm.vision_model} | LOG_LEVEL ${getLogLevel()}`);
+    logger.info({
+        port: PORT,
+        chat: `${llm.chat_provider}/${llm.chat_model}`,
+        vision: `${llm.vision_provider}/${llm.vision_model}`,
+        logLevel: getLogLevel(),
+    }, 'server_started');
+});
+
+let shuttingDown = false;
+
+async function shutdown(signal, error = null) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    logger.warn({ signal, error: error?.message }, 'server_shutdown_started');
+
+    const closeHttp = new Promise((resolve) => server.close(resolve));
+    const timeout = new Promise((resolve) => setTimeout(resolve, 10_000));
+    await Promise.race([closeHttp, timeout]);
+
+    await Promise.allSettled([
+        closePrescriptionQueue(),
+        closeRedisClient(),
+        closePool(),
+    ]);
+
+    if (error) {
+        logger.fatal({ err: error }, 'server_shutdown_due_to_fatal_error');
+        process.exit(1);
+    }
+
+    logger.warn('server_shutdown_completed');
+    process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('uncaughtException', (err) => shutdown('uncaughtException', err));
+process.on('unhandledRejection', (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    shutdown('unhandledRejection', err);
 });
