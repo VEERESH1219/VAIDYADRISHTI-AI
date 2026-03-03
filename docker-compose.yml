@@ -37,6 +37,10 @@ services:
     container_name: vaidya_api
     restart: unless-stopped
     init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ./backend/.env.production
     environment:
@@ -66,6 +70,10 @@ services:
     container_name: vaidya_worker
     restart: unless-stopped
     init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command: ["npm", "run", "worker"]
     env_file:
       - ./backend/.env.production
