@@ -18,6 +18,7 @@ import { tmpdir }                      from 'os';
 import { join }                        from 'path';
 import { fileURLToPath }               from 'url';
 import path                            from 'path';
+import { logger }                      from '../utils/logger.js';
 
 const __dirname    = path.dirname(fileURLToPath(import.meta.url));
 const PADDLE_SCRIPT = join(__dirname, '..', 'scripts', 'paddle_ocr.py');
@@ -94,11 +95,11 @@ export async function runPaddleOCR(imageBuffer) {
             });
         });
 
-        console.log(
-            `[PaddleOCR] ${result.line_count} lines, ` +
-            `avg confidence ${result.confidence}%, ` +
-            `${result.text?.length || 0} chars`
-        );
+        logger.info({
+            lines: result.line_count,
+            avgConfidence: result.confidence,
+            textLength: result.text?.length || 0,
+        }, '[PaddleOCR] OCR completed');
 
         return {
             text:       result.text       || '',
