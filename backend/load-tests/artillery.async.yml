@@ -1,0 +1,23 @@
+config:
+  target: "{{ $processEnvironment.LOAD_BASE_URL || 'http://127.0.0.1:3001' }}"
+  phases:
+    - duration: 30
+      arrivalRate: 10
+    - duration: 30
+      arrivalRate: 50
+    - duration: 30
+      arrivalRate: 100
+    - duration: 30
+      arrivalRate: 200
+  defaults:
+    headers:
+      Authorization: "Bearer {{ $processEnvironment.LOAD_JWT_TOKEN }}"
+      Content-Type: "application/json"
+
+scenarios:
+  - name: async-prescription
+    flow:
+      - post:
+          url: "/api/process-prescription-async"
+          json:
+            raw_text: "Paracetamol 500mg BD x 5 days"
