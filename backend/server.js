@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import { loadEnv } from './config/env.js';
 import { validateEnvOrThrow } from './config/validateEnv.js';
 
@@ -39,6 +40,7 @@ Object.keys(process.env).forEach((key) => {
 const app = express();
 const PORT = Number(process.env.PORT);
 const GLOBAL_REQUEST_TIMEOUT_MS = Number(process.env.GLOBAL_REQUEST_TIMEOUT_MS);
+const COMPRESSION_THRESHOLD_BYTES = Number(process.env.COMPRESSION_THRESHOLD_BYTES || 1024);
 const stopResourceMonitor = startResourceMonitor({ role: 'api' });
 
 function sanitizeHeaderValue(value) {
@@ -71,6 +73,18 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'X-Requested-With', 'X-Request-Id', 'X-Master-Key'],
     credentials: true,
     maxAge: 86400,
+}));
+
+app.use(compression({
+    threshold: COMPRESSION_THRESHOLD_BYTES,
+    filter: (req, res) => {
+        if (req.path === '/metrics') return false;
+        const cacheControl = req.headers['cache-control'];
+        if (typeof cacheControl === 'string' && cacheControl.includes('no-transform')) {
+            return false;
+        }
+        return compression.filter(req, res);
+    },
 }));
 
 app.use(express.json({ limit: '25mb' }));
