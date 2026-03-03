@@ -10,7 +10,7 @@ export function attachRequestContext(req, res, next) {
         logger.info({
             requestId: req.requestId,
             method: req.method,
-            path: req.originalUrl || req.url,
+            path: req.path || req.originalUrl || req.url,
             status: res.statusCode,
             durationMs: Date.now() - startedAt,
             tenantId: req.tenantId || req.user?.tenantId || null,
