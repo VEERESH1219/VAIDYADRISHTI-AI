@@ -9,9 +9,10 @@
  */
 
 import { chatJSON } from './llmService.js';
-import dotenv from 'dotenv';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
-dotenv.config();
+loadEnv();
 
 // ── Strict 5-Step Medical Text Normalization Prompt ──────────────────────────
 const SYSTEM_PROMPT = `You are a strict medical text normalization engine.
@@ -178,8 +179,8 @@ export async function runNLPExtraction(ocrText) {
     }
 
     if (!looksLikePrescription(ocrText)) {
-        console.warn('[NLP] OCR text too short or garbled — skipping NLP to prevent hallucination.');
-        console.warn('[NLP] Rejected text:', ocrText.substring(0, 120));
+        logger.warn('[NLP] OCR text too short or garbled - skipping NLP to prevent hallucination.');
+        logger.warn({ sample: ocrText.substring(0, 120) }, '[NLP] Rejected text');
         return { medicines: [], medical_condition: null };
     }
 
@@ -189,25 +190,25 @@ export async function runNLPExtraction(ocrText) {
     while (retries <= maxRetries) {
         try {
             const userMessage = `Process the following prescription text:\n\n${ocrText}`;
-            console.log('[NLP] Input Length:', ocrText.length);
+            logger.info({ inputLength: ocrText.length }, '[NLP] Input length');
             const parsed = await chatJSON(SYSTEM_PROMPT, userMessage, 0);
-            console.log('[NLP] 5-step result:', JSON.stringify(parsed));
+            logger.debug({ parsed }, '[NLP] 5-step result');
 
             const result = mapToInternalFormat(parsed);
             if (result._cleaned_text) {
-                console.log('[NLP] cleaned_text:', result._cleaned_text);
+                logger.debug({ cleaned_text: result._cleaned_text }, '[NLP] cleaned_text');
             }
             if (result._expanded_text) {
-                console.log('[NLP] expanded_text:', result._expanded_text);
+                logger.debug({ expanded_text: result._expanded_text }, '[NLP] expanded_text');
             }
             return result;
         } catch (err) {
             retries++;
             if (retries > maxRetries) {
-                console.error('[NLP] All retries failed:', err.message);
+                logger.error({ err: err.message }, '[NLP] All retries failed');
                 throw err;
             }
-            console.warn(`[NLP] Attempt ${retries} failed, retrying...`);
+            logger.warn({ attempt: retries, err: err.message }, '[NLP] Attempt failed, retrying');
         }
     }
     return { medicines: [], medical_condition: null };
