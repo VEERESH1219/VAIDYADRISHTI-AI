@@ -6,9 +6,10 @@
  */
 
 import OpenAI from 'openai';
-import dotenv from 'dotenv';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
-dotenv.config();
+loadEnv();
 
 // Lazy client — avoids crash at startup when OPENAI_API_KEY is not yet set
 let _openai;
@@ -52,7 +53,7 @@ export async function getEmbedding(text) {
             return embedding;
         } catch (err) {
             lastError = err;
-            console.warn(`[Embedding] Attempt ${attempt}/${maxRetries} failed:`, err.message);
+            logger.warn({ attempt, maxRetries, err: err.message }, '[Embedding] Attempt failed');
 
             if (attempt < maxRetries) {
                 // Exponential backoff: 1s, 2s, 4s
