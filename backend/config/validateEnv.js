@@ -51,6 +51,13 @@ function requirePositiveInt(name, errors) {
     }
 }
 
+function validateOptionalPositiveInt(name, errors) {
+    if (process.env[name] === undefined || process.env[name] === '') return;
+    if (!isPositiveInteger(process.env[name])) {
+        errors.push(`Env var ${name} must be a positive integer when provided`);
+    }
+}
+
 function validateDatabaseConfig(errors) {
     if (isNonEmptyString(process.env.DATABASE_URL)) {
         if (isPlaceholder(process.env.DATABASE_URL)) {
@@ -113,6 +120,9 @@ export function validateEnvOrThrow({ role }) {
     }
     validateDatabaseConfig(errors);
     validateProviderSecrets(errors);
+    validateOptionalPositiveInt('DB_POOL_MAX', errors);
+    validateOptionalPositiveInt('DB_POOL_IDLE_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('DB_POOL_CONN_TIMEOUT_MS', errors);
 
     if (errors.length > 0) {
         const message = `Environment validation failed (${role}):\n- ${errors.join('\n- ')}`;
