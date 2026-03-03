@@ -14,6 +14,7 @@
 import sharp from 'sharp';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { logger } from '../utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -43,7 +44,7 @@ export async function preprocessStandard(buffer) {
             .png()
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessStandard] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessStandard] Error, using original');
         return buffer;
     }
 }
@@ -73,7 +74,7 @@ export async function preprocessHighContrast(buffer) {
             .png()
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessHighContrast] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessHighContrast] Error, using original');
         return buffer;
     }
 }
@@ -103,7 +104,7 @@ export async function preprocessBinarize(buffer) {
             .png()
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessBinarize] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessBinarize] Error, using original');
         return buffer;
     }
 }
@@ -134,7 +135,7 @@ export async function preprocessDeskew(buffer) {
             .png()
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessDeskew] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessDeskew] Error, using original');
         return buffer;
     }
 }
@@ -163,7 +164,7 @@ export async function preprocessInvert(buffer) {
             .png()
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessInvert] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessInvert] Error, using original');
         return buffer;
     }
 }
@@ -215,7 +216,7 @@ export async function preprocessForVision(buffer) {
             .jpeg({ quality: 88, mozjpeg: false })  // JPEG: 5-10x smaller than PNG
             .toBuffer();
     } catch (err) {
-        console.error('[preprocessForVision] Error, using original:', err.message);
+        logger.error({ err: err.message }, '[preprocessForVision] Error, using original');
         return buffer;
     }
 }
