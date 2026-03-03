@@ -5,6 +5,7 @@ import { logger } from '../utils/logger.js';
 const WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS);
 const PUBLIC_MAX_REQUESTS = Number(process.env.RATE_LIMIT_PUBLIC_MAX);
 const TENANT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_TENANT_MAX);
+const RATE_LIMIT_TIMEOUT_MS = Number(process.env.RATE_LIMIT_TIMEOUT_MS || 800);
 
 const redisClient = getRedisClient();
 
@@ -42,7 +43,7 @@ export async function redisRateLimiter(req, res, next) {
     try {
         await Promise.race([
             limiter.consume(key, 1),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('rate_limiter_timeout')), 800)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('rate_limiter_timeout')), RATE_LIMIT_TIMEOUT_MS)),
         ]);
         return next();
     } catch (rateErr) {
