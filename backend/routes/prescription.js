@@ -15,6 +15,17 @@ dotenv.config();
 
 const router = Router();
 
+function buildRawTextFallbackExtraction(rawText) {
+    return [{
+        id: 'ext_001',
+        brand_name: String(rawText || '').trim(),
+        brand_variant: null,
+        form: null,
+        frequency_per_day: null,
+        duration_days: null,
+    }];
+}
+
 function mergeMedicines(pathA, pathB) {
     if (!pathB || pathB.length === 0) return pathA;
     if (!pathA || pathA.length === 0) {
@@ -73,6 +84,10 @@ router.post(['/process-prescription', '/process_prescription'], async (req, res,
             ocrResult = runRawTextInput(raw_text);
             const nlp = await runNLPExtraction(ocrResult.final_text);
             extractions = nlp.medicines;
+            if (!extractions.length) {
+                extractions = buildRawTextFallbackExtraction(raw_text);
+                console.log('[Route] Raw text fallback engaged: direct matching input created');
+            }
             medical_condition = nlp.medical_condition;
         }
 
