@@ -163,6 +163,10 @@ export function recordQueueRetry(jobName) {
     safeRecord(() => queueJobRetries.inc({ job_name: jobName }));
 }
 
+export function recordQueueJobRetry(jobName) {
+    recordQueueRetry(jobName);
+}
+
 export function recordDbQuery({ operation, durationMs, success, isSlow }) {
     safeRecord(() => {
         dbQueryDuration.observe(
