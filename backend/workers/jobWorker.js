@@ -22,7 +22,18 @@ import {
 loadEnv();
 validateEnvOrThrow({ role: 'worker' });
 
-const concurrency = Number(process.env.WORKER_CONCURRENCY);
+const configuredConcurrency = Number(process.env.WORKER_CONCURRENCY);
+const dbPoolMax = Number(process.env.DB_POOL_MAX || 10);
+// Keep some headroom for non-worker DB operations to avoid pool starvation.
+const safeConcurrencyCap = Math.max(1, dbPoolMax - 2);
+const concurrency = Math.max(1, Math.min(configuredConcurrency, safeConcurrencyCap));
+if (concurrency !== configuredConcurrency) {
+    logger.warn({
+        configuredConcurrency,
+        appliedConcurrency: concurrency,
+        dbPoolMax,
+    }, 'worker_concurrency_capped_by_db_pool');
+}
 const stopResourceMonitor = startResourceMonitor({ role: 'worker' });
 
 const worker = new Worker(
