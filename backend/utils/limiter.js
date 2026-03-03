@@ -7,11 +7,14 @@
  */
 
 import pLimit from 'p-limit';
+import { loadEnv } from '../config/env.js';
 
-const provider = process.env.MODEL_PROVIDER || 'ollama';
+loadEnv();
+
+const provider = process.env.MODEL_PROVIDER;
 
 // For local Ollama → strict single concurrency
 // For cloud providers → allow small parallelism
-const concurrency = provider === 'ollama' ? 1 : 4;
+const concurrency = provider === 'ollama' ? 1 : Number(process.env.LLM_CONCURRENCY || 4);
 
 export const llmLimit = pLimit(concurrency);
