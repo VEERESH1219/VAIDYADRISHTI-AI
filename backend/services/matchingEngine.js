@@ -16,11 +16,12 @@ import { getEmbedding } from './embeddingService.js';
 import { verifyMedicineRealWorld, getMedicineDescription } from './aiVerificationService.js';
 import { findInCache, saveToCache } from './localCacheService.js';
 import { llmLimit } from '../utils/limiter.js';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
 import pLimit from 'p-limit';
-import dotenv from 'dotenv';
 
-dotenv.config();
+loadEnv();
 
 const medLimit = pLimit(2); // max 2 medicines per request
 
@@ -207,7 +208,7 @@ async function persistAiMatch(extraction, aiMatch) {
 export async function matchMedicines(extractions) {
     if (hasPostgres()) {
         const count = await getMedicineCount().catch(() => 0);
-        console.log(`[Matching] DB Ready (${count} medicines)`);
+        logger.info({ count }, '[Matching] DB Ready');
     }
 
     const results = await Promise.all(
