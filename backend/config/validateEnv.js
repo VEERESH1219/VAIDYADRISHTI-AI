@@ -100,12 +100,14 @@ export function validateEnvOrThrow({ role }) {
 
     if (role === 'api') {
         requireVar('PORT', errors);
-        requireStrongSecret('JWT_SECRET', 24, errors);
+        requireStrongSecret('JWT_SECRET', 32, errors);
         requireStrongSecret('MASTER_ADMIN_KEY', 24, errors);
         requirePositiveInt('RATE_LIMIT_WINDOW_SECONDS', errors);
         requirePositiveInt('RATE_LIMIT_PUBLIC_MAX', errors);
         requirePositiveInt('RATE_LIMIT_TENANT_MAX', errors);
         requirePositiveInt('GLOBAL_REQUEST_TIMEOUT_MS', errors);
+        requireVar('JWT_ISSUER', errors);
+        requireVar('JWT_AUDIENCE', errors);
     }
 
     if (role === 'worker') {
@@ -131,6 +133,13 @@ export function validateEnvOrThrow({ role }) {
     validateOptionalPositiveInt('REDIS_RETRY_BASE_MS', errors);
     validateOptionalPositiveInt('REDIS_RETRY_MAX_MS', errors);
     validateOptionalPositiveInt('RATE_LIMIT_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('RATE_LIMIT_IP_MAX', errors);
+    validateOptionalPositiveInt('RATE_LIMIT_AUTH_MAX', errors);
+    validateOptionalPositiveInt('RATE_LIMIT_AUTH_FAIL_MAX', errors);
+    validateOptionalPositiveInt('REQUEST_BODY_LIMIT_BYTES', errors);
+    validateOptionalPositiveInt('URLENCODED_BODY_LIMIT_BYTES', errors);
+    validateOptionalPositiveInt('JWT_TOKEN_TTL_SECONDS', errors);
+    validateOptionalPositiveInt('JWT_MAX_TOKEN_AGE_SECONDS', errors);
 
     if (errors.length > 0) {
         const message = `Environment validation failed (${role}):\n- ${errors.join('\n- ')}`;
