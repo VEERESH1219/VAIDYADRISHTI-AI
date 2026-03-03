@@ -121,8 +121,16 @@ export function validateEnvOrThrow({ role }) {
     validateDatabaseConfig(errors);
     validateProviderSecrets(errors);
     validateOptionalPositiveInt('DB_POOL_MAX', errors);
+    validateOptionalPositiveInt('DB_POOL_MIN', errors);
     validateOptionalPositiveInt('DB_POOL_IDLE_TIMEOUT_MS', errors);
     validateOptionalPositiveInt('DB_POOL_CONN_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('DB_STATEMENT_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('DB_IDLE_TX_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('DB_LOCK_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('REDIS_CONNECT_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('REDIS_RETRY_BASE_MS', errors);
+    validateOptionalPositiveInt('REDIS_RETRY_MAX_MS', errors);
+    validateOptionalPositiveInt('RATE_LIMIT_TIMEOUT_MS', errors);
 
     if (errors.length > 0) {
         const message = `Environment validation failed (${role}):\n- ${errors.join('\n- ')}`;
