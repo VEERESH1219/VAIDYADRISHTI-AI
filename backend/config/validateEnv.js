@@ -91,6 +91,13 @@ function validateProviderSecrets(errors) {
     if (providers.has('ollama')) requireNonPlaceholderVar('OLLAMA_ENDPOINT', errors);
 }
 
+function validateBillingConfig(errors) {
+    const billingProvider = (process.env.BILLING_PROVIDER || 'disabled').toLowerCase();
+    if (billingProvider === 'stripe') {
+        requireNonPlaceholderVar('STRIPE_SECRET_KEY', errors);
+    }
+}
+
 export function validateEnvOrThrow({ role }) {
     const errors = [];
 
@@ -122,6 +129,7 @@ export function validateEnvOrThrow({ role }) {
     }
     validateDatabaseConfig(errors);
     validateProviderSecrets(errors);
+    validateBillingConfig(errors);
     validateOptionalPositiveInt('DB_POOL_MAX', errors);
     validateOptionalPositiveInt('DB_POOL_MIN', errors);
     validateOptionalPositiveInt('DB_POOL_IDLE_TIMEOUT_MS', errors);
@@ -140,6 +148,11 @@ export function validateEnvOrThrow({ role }) {
     validateOptionalPositiveInt('URLENCODED_BODY_LIMIT_BYTES', errors);
     validateOptionalPositiveInt('JWT_TOKEN_TTL_SECONDS', errors);
     validateOptionalPositiveInt('JWT_MAX_TOKEN_AGE_SECONDS', errors);
+    validateOptionalPositiveInt('METRICS_SNAPSHOT_CACHE_MS', errors);
+    validateOptionalPositiveInt('STRIPE_TIMEOUT_MS', errors);
+    validateOptionalPositiveInt('BILLING_MONTHLY_QUOTA_FREE', errors);
+    validateOptionalPositiveInt('BILLING_MONTHLY_QUOTA_PRO', errors);
+    validateOptionalPositiveInt('BILLING_MONTHLY_QUOTA_ENTERPRISE', errors);
 
     if (errors.length > 0) {
         const message = `Environment validation failed (${role}):\n- ${errors.join('\n- ')}`;
