@@ -1,6 +1,7 @@
 import IORedis from 'ioredis';
 import { loadEnv } from './env.js';
 import { logger } from '../utils/logger.js';
+import { recordRedisLatency } from '../observability/metrics.js';
 
 loadEnv();
 
@@ -32,14 +33,25 @@ export function getRedisClient() {
 }
 
 export async function pingRedis() {
+    const details = await pingRedisDetailed();
+    return details.ok;
+}
+
+export async function pingRedisDetailed() {
+    const startedAt = process.hrtime.bigint();
     try {
         const result = await Promise.race([
             getRedisClient().ping(),
             new Promise((_, reject) => setTimeout(() => reject(new Error('redis_ping_timeout')), 1500)),
         ]);
-        return result === 'PONG';
-    } catch {
-        return false;
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        const ok = result === 'PONG';
+        recordRedisLatency({ operation: 'ping', durationMs, success: ok });
+        return { ok, latencyMs: durationMs };
+    } catch (err) {
+        const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+        recordRedisLatency({ operation: 'ping', durationMs, success: false });
+        return { ok: false, latencyMs: durationMs, error: err?.message };
     }
 }
 
