@@ -42,3 +42,29 @@ export function requireAuth(req, res, next) {
     });
   }
 }
+
+export function requireRole(rolesArray = []) {
+  return (req, res, next) => {
+    if (!req.user || !req.role) {
+      return res.status(401).json({
+        success: false,
+        requestId: req.requestId,
+        message: 'Authentication required'
+      });
+    }
+
+    if (!Array.isArray(rolesArray) || rolesArray.length === 0) {
+      return next();
+    }
+
+    if (!rolesArray.includes(req.role)) {
+      return res.status(403).json({
+        success: false,
+        requestId: req.requestId,
+        message: 'Forbidden: insufficient role permissions'
+      });
+    }
+
+    return next();
+  };
+}

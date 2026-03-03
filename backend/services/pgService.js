@@ -204,6 +204,63 @@ export async function getMedicineCount() {
     }
 }
 
+export async function getTenantDailyLimit(tenantId) {
+    if (!tenantId || !hasPostgres()) return 500;
+
+    try {
+        const { rows } = await getPool().query(
+            `
+            SELECT daily_limit
+            FROM tenants
+            WHERE id = $1
+            LIMIT 1
+            `,
+            [tenantId]
+        );
+
+        const value = Number(rows[0]?.daily_limit);
+        return Number.isFinite(value) ? value : 500;
+    } catch (err) {
+        console.warn('[PostgreSQL] tenants daily_limit fallback:', err.message);
+        return 500;
+    }
+}
+
+export async function getTenantTodayUsage(tenantId) {
+    if (!tenantId || !hasPostgres()) {
+        return {
+            total_requests: 0,
+            total_extractions: 0
+        };
+    }
+
+    try {
+        const { rows } = await getPool().query(
+            `
+            SELECT
+                COUNT(*)::int AS total_requests,
+                COALESCE(SUM(extracted_count), 0)::int AS total_extractions
+            FROM prescription_logs
+            WHERE tenant_id = $1
+              AND created_at >= CURRENT_DATE
+              AND created_at < CURRENT_DATE + INTERVAL '1 day'
+            `,
+            [tenantId]
+        );
+
+        return {
+            total_requests: rows[0]?.total_requests || 0,
+            total_extractions: rows[0]?.total_extractions || 0
+        };
+    } catch (err) {
+        console.warn('[PostgreSQL] tenant usage fallback:', err.message);
+        return {
+            total_requests: 0,
+            total_extractions: 0
+        };
+    }
+}
+
 export async function insertPrescriptionLog({
     tenantId,
     userId,

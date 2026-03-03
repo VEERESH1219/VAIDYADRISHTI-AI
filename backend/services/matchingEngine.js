@@ -7,7 +7,6 @@ import {
     exactMatch   as pgExact,
     fuzzyMatch   as pgFuzzy,
     genericFuzzyMatch,
-    containsMatch,
     vectorMatch  as pgVector,
     insertMedicine,
     getMedicineCount,
@@ -25,7 +24,7 @@ dotenv.config();
 
 const medLimit = pLimit(2); // max 2 medicines per request
 
-const MIN_FUZZY_ACCEPT = 50;
+const MIN_FUZZY_ACCEPT = 65;
 
 function deriveConfidence(score) {
     if (score >= 90) return 'High';
@@ -33,9 +32,17 @@ function deriveConfidence(score) {
     return 'Low';
 }
 
-function normaliseName(name) {
-    return name
-        .replace(/\b(tablet|tab|capsule|cap|injection|inj|syrup|syr|ointment|solution|drops|cream|gel|spray|powder)\b/gi, '')
+function normalizeMedicineName(input) {
+    if (!input) return '';
+
+    return String(input)
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/\b\d+(\.\d+)?\s*(mg|ml|mcg|g|iu)\b/gi, ' ')
+        .replace(/\b(mg|ml|mcg|g|iu)\b/gi, ' ')
+        .replace(/\b(tablet|tab|tabs|capsule|cap|caps|injection|inj|syrup|syr|ointment|solution|drops|drop|cream|gel|spray|powder)\b/gi, ' ')
+        .replace(/\b\d+(\.\d+)?\b/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
 }
@@ -58,47 +65,112 @@ function buildSearchName(extraction) {
         : extraction.brand_name;
 }
 
+function buildSearchCandidates(extraction) {
+    const candidates = [
+        buildSearchName(extraction),
+        extraction.brand_name,
+        normalizeMedicineName(buildSearchName(extraction)),
+        normalizeMedicineName(extraction.brand_name),
+    ].filter(Boolean);
+
+    return [...new Set(candidates)];
+}
+
 async function stageExact(extraction) {
     if (!hasPostgres()) return null;
 
-    const name = buildSearchName(extraction);
-    const rows = await pgExact(name);
-    if (!rows.length) return null;
+    const candidates = buildSearchCandidates(extraction);
+    for (const name of candidates) {
+        const rows = await pgExact(name);
+        if (rows.length) {
+            return {
+                record: rows[0],
+                method: 'EXACT',
+                rawScore: 100,
+                ambiguous: false,
+                requires_human_verification: false,
+            };
+        }
+    }
 
-    return { record: rows[0], method: 'EXACT', rawScore: 100 };
+    return null;
 }
 
 async function stageFuzzy(extraction) {
     if (!hasPostgres()) return null;
 
-    const name = buildSearchName(extraction);
-    const rows = await pgFuzzy(name, 0.35, 5, extraction.form || null);
+    const name = normalizeMedicineName(buildSearchName(extraction));
+    if (!name) return null;
+
+    const rows = await pgFuzzy(name, 0.65, 5, extraction.form || null);
     if (!rows.length) return null;
 
-    const score = parseFloat(rows[0].trgm_score) || 0;
-    if (score < MIN_FUZZY_ACCEPT) return null;
+    const safeRows = rows.filter((row) => (parseFloat(row.trgm_score) || 0) >= MIN_FUZZY_ACCEPT);
+    if (!safeRows.length) return null;
 
-    return { record: rows[0], method: 'FUZZY', rawScore: score };
+    const score = parseFloat(safeRows[0].trgm_score) || 0;
+    const ambiguous = safeRows.length > 1;
+
+    return {
+        record: safeRows[0],
+        method: 'FUZZY',
+        rawScore: score,
+        ambiguous,
+        requires_human_verification: ambiguous,
+    };
+}
+
+async function stageGeneric(extraction) {
+    if (!hasPostgres()) return null;
+
+    const name = normalizeMedicineName(buildSearchName(extraction));
+    if (!name) return null;
+
+    const rows = await genericFuzzyMatch(name, 0.65, 5);
+    if (!rows.length) return null;
+
+    const safeRows = rows.filter((row) => (parseFloat(row.trgm_score) || 0) >= MIN_FUZZY_ACCEPT);
+    if (!safeRows.length) return null;
+
+    const score = parseFloat(safeRows[0].trgm_score) || 0;
+    const ambiguous = safeRows.length > 1;
+
+    return {
+        record: safeRows[0],
+        method: 'GENERIC_FUZZY',
+        rawScore: score,
+        ambiguous,
+        requires_human_verification: ambiguous,
+    };
 }
 
 async function stageVector(extraction) {
     if (!hasPostgres()) return null;
 
     try {
-        const embedding = await getEmbedding(buildSearchName(extraction));
+        const searchName = normalizeMedicineName(buildSearchName(extraction));
+        if (!searchName) return null;
+
+        const embedding = await getEmbedding(searchName);
         const rows = await pgVector(embedding, 5, extraction.form || null);
         if (!rows.length) return null;
 
         const score = Math.round((parseFloat(rows[0].similarity_score) || 0) * 100);
         if (score < 50) return null;
 
-        return { record: rows[0], method: 'VECTOR', rawScore: score };
+        return {
+            record: rows[0],
+            method: 'VECTOR',
+            rawScore: score,
+            ambiguous: false,
+            requires_human_verification: false,
+        };
     } catch {
         return null;
     }
 }
 
-function formatMatch(extraction, record, method, rawScore) {
+function formatMatch(extraction, record, method, rawScore, ambiguous = false, requiresHumanVerification = false) {
     return {
         id: record.id,
         brand_name: record.brand_name,
@@ -110,6 +182,8 @@ function formatMatch(extraction, record, method, rawScore) {
         confidence: deriveConfidence(rawScore),
         match_method: method,
         verified_by: 'LOCAL_POSTGRES',
+        ambiguous,
+        requires_human_verification: requiresHumanVerification,
     };
 }
 
@@ -139,67 +213,107 @@ export async function matchMedicines(extractions) {
     const results = await Promise.all(
         extractions.map(extraction =>
             medLimit(async () => {
+                try {
+                    const normalizedInput = normalizeMedicineName(buildSearchName(extraction));
 
-                const cached = findInCache(extraction.brand_name, extraction.brand_variant);
-                if (cached) {
-                    const description = await llmLimit(() =>
-                        getMedicineDescription(cached.brand_name, cached.generic_name)
-                    ).catch(() => null);
+                    const cached =
+                        findInCache(extraction.brand_name, extraction.brand_variant) ||
+                        findInCache(normalizedInput, extraction.brand_variant);
+
+                    if (cached) {
+                        const description = await llmLimit(() =>
+                            getMedicineDescription(cached.brand_name, cached.generic_name)
+                        ).catch(() => null);
+
+                        const matchedMedicine = {
+                            ...cached,
+                            description,
+                            ambiguous: false,
+                            requires_human_verification: false,
+                        };
+
+                        return {
+                            raw_input: extraction.brand_name,
+                            structured_data: extraction,
+                            matched_medicine: matchedMedicine,
+                            fallback_required: false,
+                            ambiguous: false,
+                            requires_human_verification: false,
+                        };
+                    }
+
+                    let match =
+                        await stageExact(extraction) ||
+                        await stageFuzzy(extraction) ||
+                        await stageGeneric(extraction) ||
+                        await stageVector(extraction);
+
+                    let matchedMedicine = null;
+                    let fallbackRequired = false;
+
+                    if (match) {
+                        matchedMedicine = formatMatch(
+                            extraction,
+                            match.record,
+                            match.method,
+                            match.rawScore,
+                            !!match.ambiguous,
+                            !!match.requires_human_verification
+                        );
+                    } else {
+                        fallbackRequired = true;
+                        const aiMatch = await llmLimit(() =>
+                            verifyMedicineRealWorld(
+                                extraction.brand_name,
+                                extraction.brand_variant,
+                                extraction.form
+                            )
+                        ).catch(() => null);
+
+                        if (aiMatch) {
+                            matchedMedicine = {
+                                ...aiMatch,
+                                ambiguous: false,
+                                requires_human_verification: false,
+                            };
+                            if (aiMatch.confidence === 'High') {
+                                await persistAiMatch(extraction, aiMatch);
+                            }
+                        }
+                    }
+
+                    if (matchedMedicine) {
+                        const description = await llmLimit(() =>
+                            getMedicineDescription(
+                                matchedMedicine.brand_name,
+                                matchedMedicine.generic_name
+                            )
+                        ).catch(() => null);
+
+                        matchedMedicine.description = description;
+                    }
+
+                    const ambiguous = !!matchedMedicine?.ambiguous;
+                    const requiresHumanVerification = !!matchedMedicine?.requires_human_verification;
 
                     return {
                         raw_input: extraction.brand_name,
                         structured_data: extraction,
-                        matched_medicine: { ...cached, description },
+                        matched_medicine: matchedMedicine,
+                        fallback_required: fallbackRequired,
+                        ambiguous,
+                        requires_human_verification: requiresHumanVerification,
+                    };
+                } catch {
+                    return {
+                        raw_input: extraction.brand_name,
+                        structured_data: extraction,
+                        matched_medicine: null,
+                        fallback_required: true,
+                        ambiguous: false,
+                        requires_human_verification: false,
                     };
                 }
-
-                let match =
-                    await stageExact(extraction) ||
-                    await stageFuzzy(extraction) ||
-                    await stageVector(extraction);
-
-                let matchedMedicine = null;
-
-                if (match) {
-                    matchedMedicine = formatMatch(
-                        extraction,
-                        match.record,
-                        match.method,
-                        match.rawScore
-                    );
-                } else {
-                    const aiMatch = await llmLimit(() =>
-                        verifyMedicineRealWorld(
-                            extraction.brand_name,
-                            extraction.brand_variant,
-                            extraction.form
-                        )
-                    ).catch(() => null);
-
-                    if (aiMatch) {
-                        matchedMedicine = aiMatch;
-                        if (aiMatch.confidence === 'High') {
-                            await persistAiMatch(extraction, aiMatch);
-                        }
-                    }
-                }
-
-                if (matchedMedicine) {
-                    const description = await llmLimit(() =>
-                        getMedicineDescription(
-                            matchedMedicine.brand_name,
-                            matchedMedicine.generic_name
-                        )
-                    ).catch(() => null);
-
-                    matchedMedicine.description = description;
-                }
-
-                return {
-                    raw_input: extraction.brand_name,
-                    structured_data: extraction,
-                    matched_medicine: matchedMedicine,
-                };
             })
         )
     );

@@ -7,10 +7,13 @@ import { randomUUID } from 'crypto';
 
 import prescriptionRouter from './routes/prescription.js';
 import adminTenantRouter from './routes/admin/tenant.js';
+import adminResetTenantUsageRouter from './routes/admin/resetTenantUsage.js';
+import tenantUsageRouter from './routes/tenant/usage.js';
 import { requireAuth } from './middleware/authMiddleware.js';
 
 import { getLLMInfo } from './services/llmService.js';
-import { hasPostgres, pingDb, getMedicineCount } from './services/pgService.js';
+import { hasPostgres, pingDb, getMedicineCount, getTenantDailyLimit, getTenantTodayUsage } from './services/pgService.js';
+import { logger, getLogLevel } from './utils/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: join(__dirname, '.env') });
@@ -50,7 +53,7 @@ app.use((req, res, next) => {
 
     const startedAt = Date.now();
     res.on('finish', () => {
-        console.log(JSON.stringify({
+        logger.info(JSON.stringify({
             requestId: req.requestId,
             method: req.method,
             path: req.originalUrl || req.url,
@@ -87,10 +90,11 @@ app.use((req, res, next) => {
     if (req.path === '/health') return next();
 
     const now = Date.now();
-    const ip = getClientIp(req);
+    const tenantId = req.tenantId || req.user?.tenantId || null;
+    const key = tenantId ? `tenant:${tenantId}` : `ip:${getClientIp(req)}`;
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
 
-    const history = rateLimitStore.get(ip) || [];
+    const history = rateLimitStore.get(key) || [];
     const recent = history.filter(ts => ts > windowStart);
 
     if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
@@ -102,7 +106,7 @@ app.use((req, res, next) => {
     }
 
     recent.push(now);
-    rateLimitStore.set(ip, recent);
+    rateLimitStore.set(key, recent);
     next();
 });
 
@@ -149,11 +153,37 @@ app.get('/health', async (req, res, next) => {
 // Admin Tenant Route (Master Key Protected)
 // ─────────────────────────────────────────────
 app.use('/admin', adminTenantRouter);
+app.use('/admin', adminResetTenantUsageRouter);
 
 // ─────────────────────────────────────────────
 // Protected API Routes (JWT Required)
 // ─────────────────────────────────────────────
+app.use('/api', requireAuth, async (req, res, next) => {
+    const tenantId = req.tenantId;
+    if (!tenantId || !hasPostgres()) return next();
+
+    try {
+        const tenantDailyLimit = await getTenantDailyLimit(tenantId);
+        if (tenantDailyLimit <= 0) return next();
+
+        const usage = await getTenantTodayUsage(tenantId);
+        if (usage.total_requests >= tenantDailyLimit) {
+            return res.status(429).json({
+                success: false,
+                requestId: req.requestId,
+                message: 'Tenant daily quota exceeded.',
+            });
+        }
+
+        return next();
+    } catch (err) {
+        err.statusCode = err.statusCode || 500;
+        return next(err);
+    }
+});
+
 app.use('/api', requireAuth, prescriptionRouter);
+app.use('/api', requireAuth, tenantUsageRouter);
 
 // ─────────────────────────────────────────────
 // 404 Handler
@@ -176,7 +206,7 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
     if (res.headersSent) return next(err);
 
-    console.error('[server.error]', {
+    logger.error('[server.error]', {
         requestId: req.requestId,
         method: req.method,
         path: req.originalUrl || req.url,
@@ -202,10 +232,14 @@ app.use((err, req, res, next) => {
 });
 
 process.on('uncaughtException', (err) => {
-    console.error('[Server] Uncaught exception:', err);
+    logger.error('[Server] Uncaught exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+    logger.error('[Server] Unhandled rejection:', reason);
 });
 
 app.listen(PORT, () => {
     const llm = getLLMInfo();
-    console.log(`[Server] Port ${PORT} | Chat ${llm.chat_provider}/${llm.chat_model} | Vision ${llm.vision_provider}/${llm.vision_model}`);
+    logger.info(`[Server] Port ${PORT} | Chat ${llm.chat_provider}/${llm.chat_model} | Vision ${llm.vision_provider}/${llm.vision_model} | LOG_LEVEL ${getLogLevel()}`);
 });
