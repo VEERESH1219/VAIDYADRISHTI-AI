@@ -30,7 +30,8 @@ import Tesseract                  from 'tesseract.js';
 import sharp                      from 'sharp';
 import { visionOCR, VISION_PROVIDER } from './llmService.js';
 import { runPaddleOCR }           from './paddleOcrService.js';
-import dotenv                     from 'dotenv';
+import { loadEnv }                from '../config/env.js';
+import { logger }                 from '../utils/logger.js';
 import {
     preprocessStandard,
     preprocessHighContrast,
@@ -41,7 +42,7 @@ import {
 } from './preprocessingService.js';
 import { buildConsensus, deriveQualityTag } from '../utils/consensus.js';
 
-dotenv.config();
+loadEnv();
 
 // Tesseract preprocessing variants (Tier 3 only)
 const PREPROCESSING_VARIANTS = [
@@ -118,9 +119,9 @@ async function prepareForVision(imageBuffer) {
  * Tier 1 — Vision LLM OCR.
  */
 async function runVisionOCR(base64DataUri) {
-    console.log(`[OCR] Tier 1 — Vision LLM (${VISION_PROVIDER}) starting...`);
+    logger.info({ provider: VISION_PROVIDER }, '[OCR] Tier 1 - Vision LLM starting');
     const text = await visionOCR(base64DataUri, VISION_SYSTEM_PROMPT, VISION_USER_PROMPT);
-    console.log(`[OCR] Vision result (${text?.length || 0} chars):\n`, text?.slice(0, 400));
+    logger.debug({ length: text?.length || 0, sample: text?.slice(0, 400) }, '[OCR] Vision result');
     return text || '';
 }
 
@@ -141,7 +142,7 @@ async function runTesseractPasses(imageBuffer, passes = 3) {
                 try {
                     await sharp(processedBuffer).metadata();
                 } catch {
-                    console.warn(`[OCR Tesseract: ${variant.name}] buffer unreadable, skipping`);
+                    logger.warn({ variant: variant.name }, '[OCR Tesseract] Buffer unreadable, skipping');
                     return { variant: variant.name, text: '', confidence: 0 };
                 }
 
@@ -151,7 +152,7 @@ async function runTesseractPasses(imageBuffer, passes = 3) {
                 });
                 return { variant: variant.name, text: data.text || '', confidence: data.confidence || 0 };
             } catch (err) {
-                console.warn(`[OCR Tesseract: ${variant.name}] ${err.message}`);
+                logger.warn({ variant: variant.name, err: err.message }, '[OCR Tesseract] Variant failed');
                 return { variant: variant.name, text: '', confidence: 0 };
             }
         })
@@ -166,7 +167,10 @@ async function runTesseractPasses(imageBuffer, passes = 3) {
     const finalText = consensusResult.score >= 20 ? consensusResult.text : bestPass.text;
     const finalConf = consensusResult.score >= 20 ? consensusResult.score : bestPass.confidence;
 
-    console.log(`[OCR] Tesseract: ${validPasses.length} valid passes, best confidence ${bestPass.confidence.toFixed(0)}%`);
+    logger.info({
+        validPasses: validPasses.length,
+        bestConfidence: Number(bestPass.confidence.toFixed(0)),
+    }, '[OCR] Tesseract completed');
     return { text: finalText, confidence: finalConf };
 }
 
@@ -228,14 +232,14 @@ export async function runMultiPassOCR(imageInput, options = {}) {
     // handle parallel calls so Vision is kept for them.
     const skipVision = VISION_PROVIDER === 'ollama';
     if (skipVision) {
-        console.log('[OCR] Skipping Ollama Vision (would block NLP queue) — Tesseract handles image');
+        logger.info('[OCR] Skipping Ollama Vision (would block NLP queue)');
     }
 
     const visionTier = skipVision
         ? Promise.reject(new Error('Ollama Vision skipped — Tesseract is faster'))
         : makeTier(
             runVisionOCR(visionDataUri).catch(err => {
-                console.error('[OCR] Vision LLM error:', err.message);
+                logger.error({ err: err.message }, '[OCR] Vision LLM error');
                 return '';
             }),
             1, `${VISION_PROVIDER}_vision`, 92
@@ -244,7 +248,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
     const paddleTier = makeTier(
         runPaddleOCR(imageBuffer).catch(err => {
             const shortMsg = err.message?.split('\n')[0] || err.message;
-            console.warn('[OCR] PaddleOCR unavailable:', shortMsg);
+            logger.warn({ err: shortMsg }, '[OCR] PaddleOCR unavailable');
             return { text: '', confidence: 0 };
         }),
         2, 'paddleocr', 70
@@ -252,7 +256,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
 
     const tessTier = makeTier(
         runTesseractPasses(imageBuffer, Math.min(passes, 3)).catch(err => {
-            console.error('[OCR] Tesseract error:', err.message);
+            logger.error({ err: err.message }, '[OCR] Tesseract error');
             return { text: '', confidence: 0 };
         }),
         3, 'tesseract', 0
@@ -270,7 +274,12 @@ export async function runMultiPassOCR(imageInput, options = {}) {
     if (best) {
         const tierSources = ['', `${VISION_PROVIDER}_vision_primary`, 'paddleocr', 'tesseract'];
         const tierFallback = ['', null, 'paddleocr_fallback', 'tesseract_fallback'];
-        console.log(`[OCR] ✓ Tier ${best.tier} (${best.label}) won — ${best.text.length} chars, confidence ${best.confidence}`);
+        logger.info({
+            winningTier: best.tier,
+            label: best.label,
+            textLength: best.text.length,
+            confidence: best.confidence,
+        }, '[OCR] Tier winner selected');
         return {
             final_text:       best.text,
             consensus_score:  best.confidence,
@@ -283,7 +292,7 @@ export async function runMultiPassOCR(imageInput, options = {}) {
     }
 
     // ── All tiers failed ──────────────────────────────────────────────────────
-    console.error('[OCR] ✗ All three OCR tiers returned empty results');
+    logger.error('[OCR] All OCR tiers returned empty results');
     return {
         final_text:       '',
         consensus_score:  0,
