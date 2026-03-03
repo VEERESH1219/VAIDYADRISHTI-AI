@@ -28,6 +28,13 @@ export function getPrescriptionQueue() {
     return queue;
 }
 
+export function getPrescriptionQueueState() {
+    return {
+        initialized: !!queue,
+        redis_status: getRedisClient().status || 'unknown',
+    };
+}
+
 export async function closePrescriptionQueue() {
     if (!queue) return;
     await queue.close();
