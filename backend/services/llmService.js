@@ -28,15 +28,10 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { Ollama } from 'ollama';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
-// Load env from backend/.env regardless of which directory `node` was invoked from.
-// Without this, the module-level constants (VISION_MODEL etc.) get resolved before
-// server.js's dotenv.config() runs — causing OLLAMA_VISION_MODEL to be ignored.
-const __llmdir = dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: join(__llmdir, '../.env') });
+loadEnv();
 
 // ── Provider Resolution ────────────────────────────────────────────────────
 // Priority: MODEL_PROVIDER env var  >  USE_LOCAL_LLM legacy flag
@@ -96,7 +91,7 @@ function anthropicClient() {
     return _anthropic;
 }
 function ollamaClient() {
-    if (!_ollama) _ollama = new Ollama({ host: process.env.OLLAMA_ENDPOINT || 'http://127.0.0.1:11434' });
+    if (!_ollama) _ollama = new Ollama({ host: process.env.OLLAMA_ENDPOINT });
     return _ollama;
 }
 function geminiAI() {
@@ -314,7 +309,7 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
         const apiKey = process.env.GOOGLE_VISION_API_KEY;
         if (!apiKey) throw new Error('GOOGLE_VISION_API_KEY is not set in .env');
 
-        console.log('[OCR] Using Google Cloud Vision (DOCUMENT_TEXT_DETECTION)...');
+        logger.info('[OCR] Using Google Cloud Vision (DOCUMENT_TEXT_DETECTION)');
         const url  = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
         const body = {
             requests: [{
@@ -339,13 +334,13 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
 
         const data = await res.json();
         const text = data.responses?.[0]?.fullTextAnnotation?.text || '';
-        console.log(`[OCR] Google Vision result (${text.length} chars):\n`, text.slice(0, 400));
+        logger.debug({ length: text.length, sample: text.slice(0, 400) }, '[OCR] Google Vision result');
         return text;
     }
 
     // ── Anthropic Vision ───────────────────────────────────────────────────
     if (VISION_PROVIDER === 'anthropic') {
-        console.log(`[OCR] Using Claude Vision (${VISION_MODEL}) as fallback…`);
+        logger.info({ model: VISION_MODEL }, '[OCR] Using Claude Vision as fallback');
         const response = await anthropicClient().messages.create({
             model:      VISION_MODEL,
             max_tokens: 2048,
@@ -359,26 +354,26 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
             }],
         });
         const text = response.content[0]?.text?.trim() || '';
-        console.log('[OCR] Claude Vision result:\n', text);
+        logger.debug({ sample: text }, '[OCR] Claude Vision result');
         return text;
     }
 
     // ── Gemini Vision ──────────────────────────────────────────────────────
     if (VISION_PROVIDER === 'gemini') {
-        console.log(`[OCR] Using Gemini Vision (${VISION_MODEL}) as fallback…`);
+        logger.info({ model: VISION_MODEL }, '[OCR] Using Gemini Vision as fallback');
         const model  = geminiAI().getGenerativeModel({ model: VISION_MODEL });
         const result = await model.generateContent([
             { text: `${systemPrompt}\n\n${userPrompt}` },
             { inlineData: { mimeType: rawMime, data: base64Raw } },
         ]);
         const text = result.response.text()?.trim() || '';
-        console.log('[OCR] Gemini Vision result:\n', text);
+        logger.debug({ sample: text }, '[OCR] Gemini Vision result');
         return text;
     }
 
     // ── Ollama Vision (local, no API key required) ─────────────────────────
     if (VISION_PROVIDER === 'ollama') {
-        console.log(`[OCR] Using Ollama Vision (${VISION_MODEL}) as fallback…`);
+        logger.info({ model: VISION_MODEL }, '[OCR] Using Ollama Vision as fallback');
         const response = await ollamaCall((signal) => ollamaClient().chat({
             model:    VISION_MODEL,
             messages: [{
@@ -388,12 +383,12 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
             }],
         }, { signal }), OLLAMA_VISION_TIMEOUT_MS);
         const text = response.message?.content?.trim() || '';
-        console.log('[OCR] Ollama Vision result:\n', text);
+        logger.debug({ sample: text }, '[OCR] Ollama Vision result');
         return text;
     }
 
     // ── OpenAI GPT-4o Vision (default) ────────────────────────────────────
-    console.log('[OCR] Using GPT-4o Vision as fallback for handwritten text…');
+    logger.info('[OCR] Using GPT-4o Vision as fallback for handwritten text');
     const response = await openaiClient().chat.completions.create({
         model:      'gpt-4o',
         temperature: 0.1,
@@ -410,7 +405,7 @@ export async function visionOCR(base64DataUri, systemPrompt, userPrompt) {
         ],
     });
     const text = response.choices[0]?.message?.content?.trim() || '';
-    console.log('[OCR] GPT-4o Vision full result:\n', text);
+    logger.debug({ sample: text }, '[OCR] GPT-4o Vision full result');
     return text;
 }
 
@@ -465,7 +460,7 @@ RULES:
 
         return parsed.medicines.length > 0 ? parsed : null;
     } catch (err) {
-        console.warn('[Direct Extract] Failed:', err.message);
+        logger.warn({ err: err.message }, '[Direct Extract] Failed');
         return null;
     }
 }
