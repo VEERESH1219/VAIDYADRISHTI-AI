@@ -11,9 +11,10 @@
  */
 
 import pg     from 'pg';
-import dotenv from 'dotenv';
+import { loadEnv } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
-dotenv.config();
+loadEnv();
 
 const { Pool } = pg;
 
@@ -23,11 +24,11 @@ let _pool = null;
 function connectionString() {
     return (
         process.env.DATABASE_URL ||
-        `postgresql://${process.env.POSTGRES_USER     || 'postgres'}` +
-        `:${process.env.POSTGRES_PASSWORD || 'postgres'}` +
-        `@${process.env.POSTGRES_HOST     || 'localhost'}` +
-        `:${process.env.POSTGRES_PORT     || 5432}` +
-        `/${process.env.POSTGRES_DB       || 'vaidyadrishti'}`
+        `postgresql://${process.env.POSTGRES_USER}` +
+        `:${process.env.POSTGRES_PASSWORD}` +
+        `@${process.env.POSTGRES_HOST}` +
+        `:${process.env.POSTGRES_PORT}` +
+        `/${process.env.POSTGRES_DB}`
     );
 }
 
@@ -40,7 +41,7 @@ export function getPool() {
             connectionTimeoutMillis: 5_000,
         });
         _pool.on('error', (err) => {
-            console.error('[PostgreSQL] Pool error:', err.message);
+            logger.error({ err: err.message }, '[PostgreSQL] Pool error');
         });
     }
     return _pool;
@@ -50,8 +51,13 @@ export function getPool() {
 export function hasPostgres() {
     return !!(
         process.env.DATABASE_URL ||
-        process.env.POSTGRES_PASSWORD ||
-        process.env.POSTGRES_HOST
+        (
+            process.env.POSTGRES_HOST &&
+            process.env.POSTGRES_PORT &&
+            process.env.POSTGRES_DB &&
+            process.env.POSTGRES_USER &&
+            process.env.POSTGRES_PASSWORD
+        )
     );
 }
 
@@ -162,7 +168,7 @@ export async function vectorMatch(queryEmbedding, limit = 5, preferredForm = nul
     } catch (err) {
         // pgvector not installed or embedding column missing — graceful fallback
         if (err.message.includes('vector') || err.message.includes('embedding') || err.message.includes('type')) {
-            console.warn('[PostgreSQL] Vector search unavailable:', err.message);
+            logger.warn({ err: err.message }, '[PostgreSQL] Vector search unavailable');
             return [];
         }
         throw err;
@@ -189,7 +195,7 @@ export async function insertMedicine(med) {
         );
         return rowCount > 0;
     } catch (err) {
-        console.error('[PostgreSQL] Insert error:', err.message);
+        logger.error({ err: err.message }, '[PostgreSQL] Insert error');
         return false;
     }
 }
@@ -221,7 +227,7 @@ export async function getTenantDailyLimit(tenantId) {
         const value = Number(rows[0]?.daily_limit);
         return Number.isFinite(value) ? value : 500;
     } catch (err) {
-        console.warn('[PostgreSQL] tenants daily_limit fallback:', err.message);
+        logger.warn({ err: err.message }, '[PostgreSQL] tenants daily_limit fallback');
         return 500;
     }
 }
@@ -253,7 +259,7 @@ export async function getTenantTodayUsage(tenantId) {
             total_extractions: rows[0]?.total_extractions || 0
         };
     } catch (err) {
-        console.warn('[PostgreSQL] tenant usage fallback:', err.message);
+        logger.warn({ err: err.message }, '[PostgreSQL] tenant usage fallback');
         return {
             total_requests: 0,
             total_extractions: 0
@@ -282,6 +288,93 @@ export async function insertPrescriptionLog({
             extractedCount
         ]);
     } catch (err) {
-        console.warn('[PostgreSQL] prescription_logs insert skipped:', err.message);
+        logger.warn({ err: err.message }, '[PostgreSQL] prescription_logs insert skipped');
     }
+}
+
+export async function createProcessingJob({
+    jobId,
+    tenantId,
+    userId,
+    status = 'queued',
+    inputPayload,
+}) {
+    const query = `
+        INSERT INTO processing_jobs (id, tenant_id, user_id, status, input_payload)
+        VALUES ($1, $2, $3, $4, $5::jsonb)
+        ON CONFLICT (id) DO NOTHING
+    `;
+
+    await getPool().query(query, [
+        jobId,
+        tenantId,
+        userId,
+        status,
+        JSON.stringify(inputPayload || {}),
+    ]);
+}
+
+export async function markProcessingJobInProgress(jobId) {
+    await getPool().query(
+        `
+        UPDATE processing_jobs
+        SET status = 'processing',
+            started_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+          AND status = 'queued'
+        `,
+        [jobId]
+    );
+}
+
+export async function markProcessingJobCompleted(jobId, outputPayload) {
+    await getPool().query(
+        `
+        UPDATE processing_jobs
+        SET status = 'completed',
+            output_payload = $2::jsonb,
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+          AND status IN ('queued', 'processing')
+        `,
+        [jobId, JSON.stringify(outputPayload || {})]
+    );
+}
+
+export async function markProcessingJobFailed(jobId, errorMessage) {
+    await getPool().query(
+        `
+        UPDATE processing_jobs
+        SET status = 'failed',
+            error_message = LEFT($2, 1000),
+            completed_at = NOW(),
+            updated_at = NOW()
+        WHERE id = $1
+          AND status <> 'completed'
+        `,
+        [jobId, String(errorMessage || 'Job failed')]
+    );
+}
+
+export async function getProcessingJob(jobId, tenantId) {
+    const { rows } = await getPool().query(
+        `
+        SELECT id, tenant_id, user_id, status, input_payload, output_payload, error_message, created_at, started_at, completed_at
+        FROM processing_jobs
+        WHERE id = $1
+          AND tenant_id = $2
+        LIMIT 1
+        `,
+        [jobId, tenantId]
+    );
+
+    return rows[0] || null;
+}
+
+export async function closePool() {
+    if (!_pool) return;
+    await _pool.end();
+    _pool = null;
 }
