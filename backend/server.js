@@ -2,8 +2,13 @@ import express from 'express';
 import cors from 'cors';
 import compression from 'compression';
 import helmet from 'helmet';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { loadEnv } from './config/env.js';
 import { validateEnvOrThrow } from './config/validateEnv.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 import prescriptionRouter from './routes/prescription.js';
 import adminTenantRouter from './routes/admin/tenant.js';
@@ -228,6 +233,17 @@ app.use('/api', requireAuth, enforceTenantIsolation, redisRateLimiter, async (re
 app.use('/api', prescriptionRouter);
 app.use('/api', tenantUsageRouter);
 
+const frontendDistPath = path.join(__dirname, '../frontend/dist');
+app.use(express.static(frontendDistPath));
+
+app.use((req, res, next) => {
+    if (req.method !== 'GET') return next();
+    if (req.path.startsWith('/api') || req.path.startsWith('/admin') || req.path.startsWith('/health') || req.path.startsWith('/metrics')) {
+        return next();
+    }
+    res.sendFile(path.join(frontendDistPath, 'index.html'));
+});
+
 app.use((req, res) => {
     const origin = sanitizeHeaderValue(req.headers.origin);
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
@@ -271,6 +287,8 @@ app.use((err, req, res, next) => {
 
     return res.status(statusCode).json({
         success: false,
+        error: safeMessage,
+        code: statusCode >= 500 ? 'INTERNAL_ERROR' : (err?.code || 'REQUEST_ERROR'),
         requestId: req.requestId,
         message: safeMessage,
     });
