@@ -48,9 +48,12 @@ function mergeMedicines(pathA, pathB) {
     return merged;
 }
 
-export async function processPrescriptionPayload(payload) {
+export async function processPrescriptionPayload(payloadWrapper) {
     const startTime = Date.now();
-    const { image, raw_text, options = {} } = payload;
+
+    // Safely extract payload (handles both `payload` and `{ payload }` formats)
+    const payload = payloadWrapper?.payload ? payloadWrapper.payload : payloadWrapper;
+    const { image, raw_text, options = {} } = payload || {};
 
     if (!image && !raw_text) {
         const err = new Error('Either "image" (base64) or "raw_text" must be provided.');
