@@ -71,10 +71,15 @@ app.use(helmet({
             baseUri: ["'none'"],
             frameAncestors: ["'none'"],
             formAction: ["'none'"],
-            imgSrc: ["'self'", 'data:'],
-            styleSrc: ["'self'"],
+            imgSrc: ["'self'", 'data:', 'blob:'],
+            // Allow Google Fonts stylesheets and self-hosted styles
+            styleSrc: ["'self'", 'https://fonts.googleapis.com', "'unsafe-inline'"],
+            // Allow Google Fonts font files and self-hosted fonts
+            fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
             scriptSrc: ["'self'"],
-            connectSrc: ["'self'"],
+            // Allow same-origin XHR/fetch for API calls + blob: for workers
+            connectSrc: ["'self'", 'blob:'],
+            workerSrc: ["'self'", 'blob:'],
         },
     },
     crossOriginEmbedderPolicy: false,

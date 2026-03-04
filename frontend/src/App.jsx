@@ -33,7 +33,9 @@ export default function App() {
       const API_BASE = sanitize(rawBase).replace(/\/$/, '');
       const TARGET_URL = `${API_BASE}/api/process_prescription`;
 
-      console.log(`[App] Calling API: ${TARGET_URL} (Original: ${rawBase})`);
+      if (import.meta.env.DEV) {
+        console.log(`[App] Calling API: ${TARGET_URL} (Original: ${rawBase})`);
+      }
 
       const res = await fetch(TARGET_URL, {
         method: 'POST',
@@ -168,14 +170,6 @@ export default function App() {
       <main style={{ flex: 1, position: 'relative', zIndex: 10 }}>
 
         {/* IDLE */}
-        {phase === 'idle' && import.meta.env.PROD && !import.meta.env.VITE_API_URL && (
-          <div style={{ maxWidth: 480, margin: '0 auto', padding: '20px' }}>
-            <div style={{ background: 'rgba(251,113,133,0.1)', border: '1px solid rgba(251,113,133,0.2)', borderRadius: 12, padding: '16px', color: '#fb7185', fontSize: 13, textAlign: 'center' }}>
-              ⚠️ <strong>Configuration Missing:</strong> VITE_API_URL is not set.
-              Add it to your deployment environment variables and redeploy.
-            </div>
-          </div>
-        )}
         {phase === 'idle' && <Home onSubmit={run} disabled={false} />}
 
         {/* PROCESSING — pure document scan animation, no text */}

@@ -2,9 +2,8 @@ import jwt from 'jsonwebtoken';
 import { clearAuthFailures, consumeAuthFailure } from './rateLimiter.js';
 
 const JWT_ALGORITHMS = ['HS256'];
-const JWT_ISSUER = process.env.JWT_ISSUER;
-const JWT_AUDIENCE = process.env.JWT_AUDIENCE;
-const JWT_MAX_TOKEN_AGE_SECONDS = Number(process.env.JWT_MAX_TOKEN_AGE_SECONDS || 43_200);
+// NOTE: JWT_ISSUER, JWT_AUDIENCE, JWT_MAX_TOKEN_AGE_SECONDS are read lazily inside
+// each function to ensure loadEnv() has already populated process.env in ESM.
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
@@ -41,6 +40,10 @@ export async function requireAuth(req, res, next) {
   }
 
   try {
+    const JWT_ISSUER = process.env.JWT_ISSUER;
+    const JWT_AUDIENCE = process.env.JWT_AUDIENCE;
+    const JWT_MAX_TOKEN_AGE_SECONDS = Number(process.env.JWT_MAX_TOKEN_AGE_SECONDS || 43_200);
+
     const decodedToken = jwt.verify(token, process.env.JWT_SECRET, {
       algorithms: JWT_ALGORITHMS,
       issuer: JWT_ISSUER,

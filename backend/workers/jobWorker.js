@@ -24,7 +24,7 @@ loadEnv();
 validateEnvOrThrow({ role: 'worker' });
 await initErrorTracker({ service: 'worker' });
 
-const configuredConcurrency = Number(process.env.WORKER_CONCURRENCY);
+const configuredConcurrency = Number(process.env.WORKER_CONCURRENCY || 2);
 const dbPoolMax = Number(process.env.DB_POOL_MAX || 10);
 // Keep some headroom for non-worker DB operations to avoid pool starvation.
 const safeConcurrencyCap = Math.max(1, dbPoolMax - 2);

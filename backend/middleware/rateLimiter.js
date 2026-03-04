@@ -2,50 +2,80 @@ import { RateLimiterRedis } from 'rate-limiter-flexible';
 import { getRedisClient } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 
-const WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS);
-const PUBLIC_MAX_REQUESTS = Number(process.env.RATE_LIMIT_PUBLIC_MAX);
-const TENANT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_TENANT_MAX);
-const IP_MAX_REQUESTS = Number(process.env.RATE_LIMIT_IP_MAX || PUBLIC_MAX_REQUESTS);
+// ── Configuration (with safe defaults to avoid NaN) ──────────────────────
+const WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS || 60);
+const PUBLIC_MAX_REQUESTS = Number(process.env.RATE_LIMIT_PUBLIC_MAX || 120);
+const TENANT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_TENANT_MAX || 300);
+const IP_MAX_REQUESTS = Number(process.env.RATE_LIMIT_IP_MAX || PUBLIC_MAX_REQUESTS || 120);
 const AUTH_MAX_REQUESTS = Number(process.env.RATE_LIMIT_AUTH_MAX || 20);
 const AUTH_FAIL_MAX_REQUESTS = Number(process.env.RATE_LIMIT_AUTH_FAIL_MAX || 10);
 const RATE_LIMIT_TIMEOUT_MS = Number(process.env.RATE_LIMIT_TIMEOUT_MS || 800);
 
-const redisClient = getRedisClient();
+// ── Lazy-initialized rate limiters ──────────────────────────────────────
+// Previously these were created eagerly at module load which called
+// getRedisClient() before env vars were loaded — causing NaN config and
+// premature Redis connection attempts.
+let _ipLimiter, _publicLimiter, _tenantLimiter, _authLimiter, _authFailureLimiter;
 
-const ipLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rl:ip',
-    points: IP_MAX_REQUESTS,
-    duration: WINDOW_SECONDS,
-});
+function getIpLimiter() {
+    if (!_ipLimiter) {
+        _ipLimiter = new RateLimiterRedis({
+            storeClient: getRedisClient(),
+            keyPrefix: 'rl:ip',
+            points: IP_MAX_REQUESTS,
+            duration: WINDOW_SECONDS,
+        });
+    }
+    return _ipLimiter;
+}
 
-const publicLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rl:public',
-    points: PUBLIC_MAX_REQUESTS,
-    duration: WINDOW_SECONDS,
-});
+function getPublicLimiter() {
+    if (!_publicLimiter) {
+        _publicLimiter = new RateLimiterRedis({
+            storeClient: getRedisClient(),
+            keyPrefix: 'rl:public',
+            points: PUBLIC_MAX_REQUESTS,
+            duration: WINDOW_SECONDS,
+        });
+    }
+    return _publicLimiter;
+}
 
-const tenantLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rl:tenant',
-    points: TENANT_MAX_REQUESTS,
-    duration: WINDOW_SECONDS,
-});
+function getTenantLimiter() {
+    if (!_tenantLimiter) {
+        _tenantLimiter = new RateLimiterRedis({
+            storeClient: getRedisClient(),
+            keyPrefix: 'rl:tenant',
+            points: TENANT_MAX_REQUESTS,
+            duration: WINDOW_SECONDS,
+        });
+    }
+    return _tenantLimiter;
+}
 
-const authLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rl:auth',
-    points: AUTH_MAX_REQUESTS,
-    duration: WINDOW_SECONDS,
-});
+function getAuthLimiter() {
+    if (!_authLimiter) {
+        _authLimiter = new RateLimiterRedis({
+            storeClient: getRedisClient(),
+            keyPrefix: 'rl:auth',
+            points: AUTH_MAX_REQUESTS,
+            duration: WINDOW_SECONDS,
+        });
+    }
+    return _authLimiter;
+}
 
-const authFailureLimiter = new RateLimiterRedis({
-    storeClient: redisClient,
-    keyPrefix: 'rl:authfail',
-    points: AUTH_FAIL_MAX_REQUESTS,
-    duration: WINDOW_SECONDS,
-});
+function getAuthFailureLimiter() {
+    if (!_authFailureLimiter) {
+        _authFailureLimiter = new RateLimiterRedis({
+            storeClient: getRedisClient(),
+            keyPrefix: 'rl:authfail',
+            points: AUTH_FAIL_MAX_REQUESTS,
+            duration: WINDOW_SECONDS,
+        });
+    }
+    return _authFailureLimiter;
+}
 
 function getClientIp(req) {
     const xForwardedFor = req.headers['x-forwarded-for'];
@@ -82,12 +112,12 @@ export async function redisRateLimiter(req, res, next) {
     const tenantId = req.tenantId || req.user?.tenantId;
 
     try {
-        await consumeOrFailOpen(ipLimiter, ip);
+        await consumeOrFailOpen(getIpLimiter(), ip);
 
         if (tenantId) {
-            await consumeOrFailOpen(tenantLimiter, tenantId);
+            await consumeOrFailOpen(getTenantLimiter(), tenantId);
         } else {
-            await consumeOrFailOpen(publicLimiter, ip);
+            await consumeOrFailOpen(getPublicLimiter(), ip);
         }
 
         return next();
@@ -104,7 +134,7 @@ export async function authRateLimiter(req, res, next) {
     const ip = getClientIp(req);
 
     try {
-        await consumeOrFailOpen(authLimiter, ip);
+        await consumeOrFailOpen(getAuthLimiter(), ip);
         return next();
     } catch (rateErr) {
         if (typeof rateErr?.msBeforeNext !== 'number') {
@@ -120,7 +150,7 @@ export async function consumeAuthFailure(req, scope = 'auth') {
     const key = `${scope}:${ip}`;
 
     try {
-        await consumeOrFailOpen(authFailureLimiter, key);
+        await consumeOrFailOpen(getAuthFailureLimiter(), key);
         return { blocked: false, retryAfterSeconds: 0 };
     } catch (rateErr) {
         if (typeof rateErr?.msBeforeNext !== 'number') {
@@ -139,7 +169,7 @@ export async function clearAuthFailures(req, scope = 'auth') {
     const ip = getClientIp(req);
     const key = `${scope}:${ip}`;
     try {
-        await authFailureLimiter.delete(key);
+        await getAuthFailureLimiter().delete(key);
     } catch {
         // Non-critical cleanup.
     }

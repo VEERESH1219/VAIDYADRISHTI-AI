@@ -8,11 +8,14 @@
  * Creates:
  *   - pg_trgm extension (trigram fuzzy search)
  *   - medicines table
+ *   - tenants table
+ *   - prescription_logs table
+ *   - processing_jobs table
  *   - GIN trigram indexes on brand_name + generic_name (fast fuzzy queries)
  *   - B-tree index on LOWER(brand_name) (fast exact match)
  */
 
-import pg     from 'pg';
+import pg from 'pg';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -22,11 +25,11 @@ const { Client } = pg;
 function connectionString() {
     return (
         process.env.DATABASE_URL ||
-        `postgresql://${process.env.POSTGRES_USER     || 'postgres'}` +
+        `postgresql://${process.env.POSTGRES_USER || 'postgres'}` +
         `:${process.env.POSTGRES_PASSWORD || 'postgres'}` +
-        `@${process.env.POSTGRES_HOST     || 'localhost'}` +
-        `:${process.env.POSTGRES_PORT     || 5432}` +
-        `/${process.env.POSTGRES_DB       || 'vaidyadrishti'}`
+        `@${process.env.POSTGRES_HOST || 'localhost'}` +
+        `:${process.env.POSTGRES_PORT || 5432}` +
+        `/${process.env.POSTGRES_DB || 'vaidyadrishti'}`
     );
 }
 
@@ -51,7 +54,7 @@ async function main() {
             console.warn('⚠️   pgvector not available (vector search Stage 3 will be skipped):', err.message);
         }
 
-        // 2. medicines table
+        // 2a. medicines table
         await client.query(`
             CREATE TABLE IF NOT EXISTS medicines (
                 id            BIGSERIAL PRIMARY KEY,
@@ -66,7 +69,42 @@ async function main() {
         `);
         console.log('✅  medicines table ready');
 
-        // 2c. processing jobs table for async OCR/NLP pipelines
+        // 2b. tenants table (matches existing schema: id, plan, daily_limit, monthly_limit)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS tenants (
+                id            TEXT PRIMARY KEY,
+                plan          TEXT NOT NULL DEFAULT 'free',
+                daily_limit   INT NOT NULL DEFAULT 500,
+                monthly_limit INT NOT NULL DEFAULT 10000,
+                created_at    TIMESTAMPTZ DEFAULT NOW()
+            )
+        `);
+        // Insert a default dev tenant if not exists
+        await client.query(`
+            INSERT INTO tenants (id, plan, daily_limit, monthly_limit)
+            VALUES ('dev', 'free', 500, 10000)
+            ON CONFLICT (id) DO NOTHING
+        `);
+        console.log('✅  tenants table ready (dev tenant ensured)');
+
+        // 2c. prescription_logs table (matches existing schema: UUID id)
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS prescription_logs (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id       TEXT NOT NULL,
+                user_id         TEXT,
+                raw_input       TEXT DEFAULT '',
+                extracted_count INT DEFAULT 0,
+                created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        `);
+        await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_prescription_logs_tenant_created
+            ON prescription_logs (tenant_id, created_at DESC)
+        `);
+        console.log('✅  prescription_logs table ready');
+
+        // 2d. processing_jobs table for async OCR/NLP pipelines
         await client.query(`
             CREATE TABLE IF NOT EXISTS processing_jobs (
                 id            UUID PRIMARY KEY,
@@ -92,7 +130,7 @@ async function main() {
         `);
         console.log('✅  processing_jobs table ready');
 
-        // 2b. Add embedding column for vector search (pgvector, optional)
+        // 2e. Add embedding column for vector search (pgvector, optional)
         try {
             await client.query(`
                 ALTER TABLE medicines

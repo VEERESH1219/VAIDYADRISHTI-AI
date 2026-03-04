@@ -5,9 +5,8 @@ import { clearAuthFailures, consumeAuthFailure } from '../../middleware/rateLimi
 import { validateJsonObjectBody, validateRequest } from '../../middleware/validation.js';
 
 const router = Router();
-const JWT_ISSUER = process.env.JWT_ISSUER;
-const JWT_AUDIENCE = process.env.JWT_AUDIENCE;
-const JWT_TOKEN_TTL_SECONDS = Number(process.env.JWT_TOKEN_TTL_SECONDS || 43_200);
+// NOTE: JWT_ISSUER, JWT_AUDIENCE, JWT_TOKEN_TTL_SECONDS are read lazily inside
+// the route handler to ensure loadEnv() has already populated process.env in ESM.
 
 function isNonEmptyString(value, min = 1, max = 128) {
   return typeof value === 'string' && value.trim().length >= min && value.trim().length <= max;
@@ -48,6 +47,9 @@ router.post('/generate-token', validateGenerateTokenPayload, async (req, res) =>
   await clearAuthFailures(req, 'admin_master_key');
 
   const { tenantId, userId, role } = req.body;
+  const JWT_ISSUER = process.env.JWT_ISSUER;
+  const JWT_AUDIENCE = process.env.JWT_AUDIENCE;
+  const JWT_TOKEN_TTL_SECONDS = Number(process.env.JWT_TOKEN_TTL_SECONDS || 43_200);
 
   const token = jwt.sign(
     {

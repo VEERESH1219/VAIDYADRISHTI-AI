@@ -35,9 +35,17 @@ export function getPrescriptionQueue() {
 }
 
 export function getPrescriptionQueueState() {
+    // Safely read redis status — getRedisClient() will create a client if not yet
+    // initialized, so wrapping in try/catch prevents crashes if Redis is unavailable.
+    let redis_status = 'unknown';
+    try {
+        redis_status = getRedisClient().status || 'unknown';
+    } catch {
+        redis_status = 'unavailable';
+    }
     return {
         initialized: !!queue,
-        redis_status: getRedisClient().status || 'unknown',
+        redis_status,
     };
 }
 
