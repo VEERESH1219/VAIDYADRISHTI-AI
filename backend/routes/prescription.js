@@ -107,10 +107,34 @@ router.post('/process-prescription-async', validatePrescriptionPayload, async (r
                 new Promise((_, reject) => setTimeout(() => reject(new Error('queue_add_timeout')), 1500)),
             ]);
         } catch (queueErr) {
-            await markProcessingJobFailed(jobId, queueErr?.message || 'Queue unavailable');
-            const err = new Error('Unable to enqueue processing job');
-            err.statusCode = 503;
-            throw err;
+            // Memory Fallback: Attempt offline processing asynchronously rather than crashing
+            const executeOfflineFallback = async () => {
+                const {
+                    markProcessingJobInProgress,
+                    markProcessingJobCompleted,
+                    markProcessingJobFailed,
+                    insertPrescriptionLog,
+                } = await import('../services/pgService.js');
+                const { processPrescriptionPayload } = await import('../jobs/prescriptionProcessor.js');
+
+                try {
+                    await markProcessingJobInProgress(jobId);
+                    const result = await processPrescriptionPayload(req.body);
+
+                    await markProcessingJobCompleted(jobId, result);
+                    await insertPrescriptionLog({
+                        tenantId: req.tenantId,
+                        userId: req.user?.userId,
+                        rawInput: req.body?.raw_text || '[image]',
+                        extractedCount: result.extracted_count || 0,
+                    });
+                } catch (fallbackErr) {
+                    await markProcessingJobFailed(jobId, fallbackErr?.message || 'Offline fallback processing failed');
+                }
+            };
+
+            // Fire and forget
+            executeOfflineFallback().catch(err => console.error('Offline fallback crashed:', err));
         }
 
         return res.status(202).json({
