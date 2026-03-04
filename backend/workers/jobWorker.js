@@ -151,5 +151,9 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('uncaughtException', (err) => shutdown('uncaughtException', err));
 process.on('unhandledRejection', (reason) => {
     const err = reason instanceof Error ? reason : new Error(String(reason));
+    if (err.code === 'ECONNREFUSED' && err.message.includes('127.0.0.1:6379')) {
+        logger.warn({ err: err.message }, 'worker_redis_unreachable_retrying_in_background');
+        return;
+    }
     shutdown('unhandledRejection', err);
 });

@@ -13,15 +13,21 @@ export function getPrescriptionQueue() {
             defaultJobOptions: {
                 removeOnComplete: 200,
                 removeOnFail: 500,
-                attempts: Number(process.env.JOB_MAX_ATTEMPTS),
+                attempts: Number(process.env.JOB_MAX_ATTEMPTS || 3),
                 backoff: {
                     type: 'exponential',
-                    delay: Number(process.env.JOB_BACKOFF_MS),
+                    delay: Number(process.env.JOB_BACKOFF_MS || 2000),
                 },
             },
         });
+
+        // Suppress unhandled promise rejections for connection refused
         queue.on('error', (err) => {
-            logger.error({ err: err.message }, 'prescription_queue_error');
+            if (err.code === 'ECONNREFUSED') {
+                logger.warn({ err: err.message }, 'prescription_queue_redis_unreachable_retrying');
+            } else {
+                logger.error({ err: err.message }, 'prescription_queue_error');
+            }
         });
     }
 
